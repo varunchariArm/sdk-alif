@@ -1,0 +1,9 @@
+/* Route CPI exclusively into the ISP.  The generic serial_camera overlay
+ * also declares the AXI memory endpoint (port 1); video_alif treats the mere
+ * presence of that node as AXI enabled and then requires an extra CPI buffer.
+ */
+&cam {
+	ports {
+		/delete-node/ port@1;
+	};
+};

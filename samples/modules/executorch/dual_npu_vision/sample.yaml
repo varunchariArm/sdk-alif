@@ -1,0 +1,13 @@
+sample:
+  name: ExecuTorch dual-NPU live vision
+  description: Parallel U55 face detection and U85 person classification
+common:
+  tags:
+    - samples
+    - executorch
+    - video
+  platform_allow:
+    - alif_e8_dk/ae822fa0e5597xx0/rtss_hp
+  build_only: true
+tests:
+  sample.modules.executorch.dual_npu_vision: {}

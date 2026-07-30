@@ -1,0 +1,145 @@
+diff --git a/backends/arm/runtime/EthosUBackend_Cortex_M.cpp b/backends/arm/runtime/EthosUBackend_Cortex_M.cpp
+index 9639876230..b912e6d438 100644
+--- a/backends/arm/runtime/EthosUBackend_Cortex_M.cpp
++++ b/backends/arm/runtime/EthosUBackend_Cortex_M.cpp
+@@ -48,6 +48,20 @@ extern "C" __attribute__((weak)) struct ethosu_driver* ethosu_reserve_driver_ex(
+ // through a DMA engine) to reduce CPU memcpy load on the host MCU.
+ extern "C" void arm_ethos_io_memcpy(void* dst, const void* src, size_t size);
+ 
++extern "C" __attribute__((weak)) int arm_ethos_prepare_invoke_buffers(
++    uint32_t,
++    const void**,
++    size_t,
++    const void**,
++    size_t) {
++  return 0;
++}
++
++extern "C" __attribute__((weak)) unsigned char* arm_ethos_fast_scratch_for_product(
++    uint32_t) {
++  return executorch::backends::arm::ethosu_fast_scratch;
++}
++
+ namespace executorch {
+ namespace backends {
+ namespace arm {
+@@ -84,6 +98,7 @@ Error platform_execute(
+   }
+ 
+   // Allocate driver handle and synchronously invoke driver
++  ET_LOG(Debug, "multidevice reserve product=%u log2_macs=%u", product, log2_macs);
+   auto driver =
+       std::unique_ptr<ethosu_driver, decltype(&ethosu_release_driver)>(
+           ethosu_reserve_driver_ex(product, log2_macs), ethosu_release_driver);
+@@ -91,26 +106,52 @@ Error platform_execute(
+     ET_LOG(Error, "ethosu_reserve_driver_ex failed");
+     return Error::InvalidState;
+   }
++  ET_LOG(Debug, "multidevice reserved product=%u driver=%p", product, driver.get());
++
++  const void* cmd_data = handles.cmd_data;
++  const void* weight_data = handles.weight_data;
++  unsigned char* fast_scratch = arm_ethos_fast_scratch_for_product(product);
++  if (arm_ethos_prepare_invoke_buffers(
++          product,
++          &cmd_data,
++          handles.cmd_data_size,
++          &weight_data,
++          handles.weight_data_size) != 0) {
++    ET_LOG(Error, "Failed to prepare NPU-visible command/weight buffers");
++    return Error::MemoryAllocationFailed;
++  }
++  ET_LOG(
++      Debug,
++      "multidevice buffers product=%u cmd=%p/%zu weights=%p/%zu scratch=%p/%zu",
++      product,
++      cmd_data,
++      handles.cmd_data_size,
++      weight_data,
++      handles.weight_data_size,
++      ethosu_scratch,
++      handles.scratch_data_size);
+ 
+   // Ethos-U low level driver expected order for Ethos U-55, we have
+   // constant weight data, then scratch (which contains input and output)
+   // scratch is written above in this function.
+   uint64_t bases[ETHOSU_NUM_BASE_ADDRS] = {
+-      static_cast<uint64_t>(reinterpret_cast<uintptr_t>((handles.weight_data))),
++      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(weight_data)),
+       static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ethosu_scratch)),
+-      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ethosu_fast_scratch))};
++      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(fast_scratch))};
+   size_t bases_size[ETHOSU_NUM_BASE_ADDRS] = {
+       handles.weight_data_size,
+       handles.scratch_data_size,
+       ethosu_fast_scratch_size};
++  ET_LOG(Debug, "multidevice invoke product=%u", product);
+   int result = ethosu_invoke_v3(
+       driver.get(),
+-      static_cast<const void*>(handles.cmd_data),
++      cmd_data,
+       handles.cmd_data_size,
+       bases,
+       bases_size,
+       ETHOSU_NUM_BASE_ADDRS, /* fixed array of pointers to binary interface*/
+       nullptr);
++  ET_LOG(Debug, "multidevice invoke returned product=%u result=%d", product, result);
+ 
+   if (result != 0) {
+     ET_LOG(Error, "Ethos-U invocation failed error (%d)", result);
+diff --git a/runtime/executor/method.cpp b/runtime/executor/method.cpp
+index 8eb4848046..70c4d1643f 100644
+--- a/runtime/executor/method.cpp
++++ b/runtime/executor/method.cpp
+@@ -1159,7 +1159,21 @@ Method::set_input(const EValue& input_evalue, size_t input_idx) {
+       input_idx,
+       inputs_size());
+ 
+-  const auto& e = get_value(get_input_index(input_idx));
++  auto& e = mutable_value(get_input_index(input_idx));
++
++  /* Some delegated embedded programs carry Tensor metadata for a public
++   * input while the serialized runtime value is None. Permit the caller to
++   * materialize that schema-declared Tensor input. The caller owns the
++   * TensorImpl and backing storage for the Method lifetime.
++   */
++  if (e.isNone() && input_evalue.isTensor()) {
++    auto tensor_meta = method_meta().input_tensor_meta(input_idx);
++    if (tensor_meta.ok()) {
++      e = input_evalue;
++      input_set_[input_idx] = true;
++      return Error::Ok;
++    }
++  }
+ 
+   if (!(e.isNone() || e.isTensor() || e.isScalar() || e.isString())) {
+ #if ET_LOG_ENABLED
+diff --git a/zephyr/CMakeLists.txt b/zephyr/CMakeLists.txt
+index 6b6970f30c..001290f1f6 100644
+--- a/zephyr/CMakeLists.txt
++++ b/zephyr/CMakeLists.txt
+@@ -2,8 +2,15 @@
+ # Copyright (c) Meta Platforms, Inc. and affiliates.
+ # All rights reserved.
+ # Copyright 2025-2026 Arm Limited and/or its affiliates.
++# Copyright 2026 Alif Semiconductor - Modified for Alif SDK compatibility
+ #
+ # SPDX-License-Identifier: Apache-2.0
++#
++# This file was modified from the original ExecuTorch source to work with
++# Alif Semiconductor Zephyr SDK. Changes from upstream (zephyr/CMakeLists.txt):
++# - CONFIG_ETHOS_U -> CONFIG_ARM_ETHOS_U (Alif Zephyr driver Kconfig namespace)
++# - EXECUTORCH_BUILD_KERNELS_QUANTIZED_AOT set to OFF (Zephyr uses -fno-rtti)
++# - Added CMSIS-NN local path detection from the Zephyr workspace
+ 
+ if(CONFIG_EXECUTORCH)
+ 
+@@ -57,7 +64,7 @@ if(CONFIG_EXECUTORCH)
+   if(CONFIG_CPU_CORTEX_A)
+     set(EXECUTORCH_BUILD_XNNPACK ON)
+   endif()
+-  if(CONFIG_ETHOS_U)
++  if(CONFIG_ARM_ETHOS_U)
+     set(EXECUTORCH_BUILD_ARM_BAREMETAL ON)
+   endif()
+ 

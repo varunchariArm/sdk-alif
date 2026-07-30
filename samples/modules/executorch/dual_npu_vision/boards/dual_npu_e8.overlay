@@ -1,0 +1,18 @@
+/*
+ * Alif E8 dual-NPU resources for the RTSS-HP live vision demo.
+ * The application supplies the experimental multidevice driver instances.
+ */
+
+&ethosu0 {
+	compatible = "ethos-multinpu,probe";
+	status = "okay";
+};
+
+&ethosu1 {
+	compatible = "ethos-multinpu,probe";
+	status = "okay";
+};
+
+&sram1 {
+	status = "okay";
+};
