@@ -88,3 +88,64 @@ The validated workspace uses:
 
 Re-run ``setup_workspace.sh`` after ``west update`` because west may restore
 the ExecuTorch module checkout.
+
+Generating the PTE models
+*************************
+
+The checked-in PTE files are generated in two stages. First, Vela compiles the
+quantized TFLite network for the target NPU and emits an ``*_vela.npz`` file.
+Second, the scripts in ``tools/`` serialize that command stream and its tensor
+contract as an ExecuTorch program.
+
+Prepare ExecuTorch's Python tools from the workspace root. The exact setup
+options can vary with the pinned ExecuTorch revision; the following is the
+standard setup for this workspace:
+
+.. code-block:: console
+
+   cd modules/lib/executorch
+   ../../../.venv-executorch/bin/python -m pip install -r requirements-examples.txt
+   ./install_executorch.sh
+   cd ../../../
+
+Generate Vela artifacts from the original fully-int8 TFLite models. Use the
+``ensemble_vela.ini`` supplied by Alif MLEK and preserve these target settings:
+
+.. code-block:: console
+
+   vela yolo-fastest_192_face_v4.tflite \
+     --accelerator-config ethos-u55-256 \
+     --optimise Performance \
+     --config /path/to/alif-mlek/scripts/vela/ensemble_vela.ini \
+     --system-config RTSS_HP_SRAM_MRAM \
+     --memory-mode Shared_Sram \
+     --output-dir model-artifacts/yolo-u55
+
+   vela vww4_128_128_INT8.tflite \
+     --accelerator-config ethos-u85-256 \
+     --optimise Performance \
+     --config /path/to/alif-mlek/scripts/vela/ensemble_vela.ini \
+     --system-config Ethos_U85_SRAM_Only \
+     --memory-mode Sram_Only \
+     --output-dir model-artifacts/vww-u85
+
+Create both PTE files from Vela's NPZ files:
+
+.. code-block:: console
+
+   APP=$PWD/sdk-alif/samples/modules/executorch/dual_npu_vision
+   "$APP/tools/generate_pte_models.sh" \
+     model-artifacts/yolo-u55/yolo-fastest_192_face_v4_vela.npz \
+     model-artifacts/vww-u85/vww4_128_128_INT8_vela.npz
+
+Expected outputs are:
+
+* ``models/yolo_fastest_face_u55_256.pte``: 370,080 bytes, input
+  ``1x1x192x192`` int8 and two YOLO output tensors.
+* ``models/vww_u85_256.pte``: 478,560 bytes, input ``1x1x128x128`` int8 and
+  one two-class output tensor.
+
+The exporters deliberately accept Vela NPZ files instead of silently
+downloading training models. This keeps the original model license and model
+selection explicit. Rebuild the Zephyr application after replacing either PTE
+so ``u85_model.bin`` is repacked.
