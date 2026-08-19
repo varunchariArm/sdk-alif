@@ -8,6 +8,10 @@ core_driver="$workspace/modules/ethos-u-core-driver-src"
 patch="$sample_dir/patches/executorch-dual-npu.patch"
 required_core_driver=b7cd193afde80afe8bbae9a26d2ca6586554f054
 
+# west currently supplies Zephyr's older hal_ethos_u snapshot. This separate
+# main checkout is required until that manifest revision contains the merged
+# multi-variant implementation. The ancestor test accepts newer main commits.
+
 if [ ! -d "$executorch/.git" ]; then
   echo "ExecuTorch checkout not found at $executorch" >&2
   echo "Run 'west update' and initialize its submodules first." >&2
