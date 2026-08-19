@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 set(CMAKE_SKIP_INSTALL_RULES ON CACHE BOOL "" FORCE)
-set(ETHOSU_MULTI_DEVICE ON CACHE BOOL "" FORCE)
+set(ETHOSU_MULTI_VARIANT ON CACHE BOOL "" FORCE)
 set(CMSIS_PATH "$ENV{ZEPHYR_BASE}/../modules/hal/cmsis"
     CACHE PATH "" FORCE)
 
@@ -58,7 +58,7 @@ if(TARGET ethosu_core_driver)
   target_compile_definitions(ethosu_core_driver PRIVATE
     ETHOSU_SEMAPHORE_WAIT_INFERENCE=10000
     # Alif MLEK's E8/U85 settings: use Normal, non-cacheable,
-    # non-bufferable transactions.  The experimental driver's default
+    # non-bufferable transactions.  The core driver's default
     # Device attributes stall when U85 fetches this large model from MRAM.
     NPU_MEM_ATTR_0=0x20
     NPU_MEM_ATTR_1=0x20
@@ -74,7 +74,7 @@ if(TARGET ethosu_core_driver)
 endif()
 
 # The Alif callback implements the legacy single-device ABI. This application
-# supplies platform hooks for the experimental multi-device driver instead.
+# supplies platform hooks for the multi-variant core driver instead.
 set(alif_ethosu_target "..__modules__hal__alif__drivers__ethos_u")
 if(TARGET "${alif_ethosu_target}")
   get_target_property(alif_sources "${alif_ethosu_target}" SOURCES)

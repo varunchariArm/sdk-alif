@@ -3,8 +3,8 @@ Dual-NPU live vision
 
 This RTSS-HP sample runs YOLO-Fastest face detection on Ethos-U55 and Visual
 Wake Words on Ethos-U85. It uses the native Zephyr MT9M114, ISP and MW405
-drivers introduced by the updated Alif PR #879. No MLEK camera or display
-bridge is linked.
+drivers on the Alif SDK ``main`` branch. The MT9M114 and MW405 support landed
+through Alif PR #879; no MLEK camera or display bridge is linked.
 
 Hardware
 ********
@@ -13,6 +13,42 @@ Hardware
 * MT9M114 camera on J16
 * MW405 480x800 display
 * SERAM 1.110.0 and SEToolkit 1.10
+
+Create a clean workspace
+************************
+
+Use a new, empty directory so that west modules, generated files, and CMake
+caches from an older SDK or core-driver branch cannot affect the build:
+
+.. code-block:: console
+
+   mkdir alif-dual-npu-main
+   cd alif-dual-npu-main
+   python3 -m venv .venv
+   . .venv/bin/activate
+   python -m pip install --upgrade pip
+   python -m pip install west pyelftools fdt ninja
+
+   west init -m https://github.com/varunchariArm/sdk-alif.git --mr main
+   west config manifest.project-filter +executorch
+   west update
+   python -m pip install -r zephyr/scripts/requirements.txt
+   git -C modules/lib/executorch submodule update --init --recursive
+
+   git clone --branch main \
+     https://gitlab.arm.com/artificial-intelligence/ethos-u/ethos-u-core-driver.git \
+     modules/ethos-u-core-driver-src
+   git -C modules/ethos-u-core-driver-src merge-base --is-ancestor \
+     b7cd193afde80afe8bbae9a26d2ca6586554f054 HEAD
+
+   git clone https://github.com/ARM-software/CMSIS-NN.git \
+     modules/cmsis-nn-src
+   git -C modules/cmsis-nn-src checkout \
+     d933672e7ca97eec70ef43230baee7b20c2a28ae
+
+Create ``.venv-executorch`` and install the ExecuTorch Python requirements as
+described under `Generating the PTE models`_. Do not copy a previous build
+directory into this workspace.
 
 Build
 *****
@@ -28,8 +64,8 @@ sample.
 
    ./sdk-alif/samples/modules/executorch/dual_npu_vision/setup_workspace.sh
 
-The setup script is idempotent and also checks that the validated Ethos-U core
-driver checkout is present.
+The setup script is idempotent. It also verifies that the Ethos-U core driver
+checkout is on ``main`` and contains the multi-variant merge commit.
 
 .. code-block:: console
 
@@ -62,6 +98,36 @@ Outputs
 * ``build-dual-npu-vision/zephyr/zephyr.elf``
 * ``build-dual-npu-vision/u85_model.bin`` (both PTEs and startup BMP)
 
+Package and flash
+*****************
+
+Set ``ALIF_SE_TOOLS_DIR`` to the SEToolkit 1.10 application directory. Copy
+the generated application images and the sample's package configuration into
+the toolkit:
+
+.. code-block:: console
+
+   export ALIF_SE_TOOLS_DIR=/path/to/alif_se_toolkit/app-release-exec-macos
+   APP=$PWD/sdk-alif/samples/modules/executorch/dual_npu_vision
+
+   cp build-dual-npu-vision/zephyr/zephyr.bin \
+      build-dual-npu-vision/u85_model.bin \
+      "$ALIF_SE_TOOLS_DIR/build/images/"
+   cp "$APP/flash/dual-npu-vision.json" \
+      "$ALIF_SE_TOOLS_DIR/build/config/"
+
+Put the E8 DevKit in SE mode and close any terminal connected to the SE UART.
+Generate the application table of contents and write the package to MRAM:
+
+.. code-block:: console
+
+   cd "$ALIF_SE_TOOLS_DIR"
+   ./app-gen-toc -f build/config/dual-npu-vision.json
+   ./app-write-mram -p
+
+After the write completes, move the board switch to U4, open the U4 serial
+port at 115200 baud, and reset the board.
+
 Runtime behavior
 ****************
 
@@ -82,8 +148,10 @@ The validated workspace uses:
 
 * ExecuTorch at the revision selected by ``west.yml`` plus
   ``patches/executorch-dual-npu.patch``.
-* Ethos-U core driver commit ``fe1efeff3381032d459216b63a78f658f100ad75``
-  at ``modules/ethos-u-core-driver-src``.
+* Ethos-U core driver ``main`` at ``modules/ethos-u-core-driver-src``. The
+  checkout must contain commit
+  ``b7cd193afde80afe8bbae9a26d2ca6586554f054``, which renamed and merged the
+  multi-variant feature.
 * CMSIS-NN at ``modules/cmsis-nn-src``.
 
 Re-run ``setup_workspace.sh`` after ``west update`` because west may restore

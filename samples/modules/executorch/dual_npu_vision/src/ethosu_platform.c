@@ -97,54 +97,6 @@ int arm_ethos_prepare_invoke_buffers(uint32_t product,
 	return 0;
 }
 
-/* ExecuTorch currently provides only a weak multidevice compatibility stub
- * for this function. Parse the same COP1 optimizer record used by
- * ethosu_invoke_auto() so the runtime can reserve the matching U55/U85.
- */
-int ethosu_get_product_config_from_cop_data(const void *custom_data,
-
-					    const int custom_data_size,
-					    uint32_t *product,
-					    uint32_t *log2_macs)
-{
-	const uint32_t *words = custom_data;
-	size_t count;
-
-	if (words == NULL || product == NULL || log2_macs == NULL ||
-	    custom_data_size < (int)(3 * sizeof(uint32_t)) ||
-	    (custom_data_size % sizeof(uint32_t)) != 0 ||
-	    words[0] != ETHOSU_COP1_FOURCC) {
-		return -1;
-	}
-
-	count = (size_t)custom_data_size / sizeof(uint32_t);
-	for (size_t i = 1; i < count;) {
-		uint32_t action = words[i] & 0xffU;
-
-		if (action == ETHOSU_COP_OPTIMIZER_CONFIG) {
-			if (i + 2 >= count) {
-				return -1;
-			}
-			*product = words[i + 1] >> 28;
-			*log2_macs = words[i + 1] & 0xfU;
-			return 0;
-		}
-		if (action == ETHOSU_COP_COMMAND_STREAM) {
-			size_t length = words[i] >> 16;
-			if (length >= count - i) {
-				return -1;
-			}
-			i += 1 + length;
-		} else if (action == ETHOSU_COP_NOP) {
-			i++;
-		} else {
-			return -1;
-		}
-	}
-
-	return -1;
-}
-
 void *ethosu_mutex_create(void)
 {
 	struct k_mutex *m = malloc(sizeof(*m));
@@ -158,11 +110,14 @@ void ethosu_mutex_destroy(void *mutex) { free(mutex); }
 int ethosu_mutex_lock(void *mutex) { return k_mutex_lock(mutex, K_FOREVER); }
 int ethosu_mutex_unlock(void *mutex) { return k_mutex_unlock(mutex); }
 
-void *ethosu_semaphore_create(unsigned int max_count, unsigned int initial_count)
+void *ethosu_semaphore_create(void)
 {
 	struct k_sem *s = malloc(sizeof(*s));
 	if (s != NULL) {
-		k_sem_init(s, initial_count, max_count);
+		/* Core-driver main owns the semaphore policy: waiters start empty and
+		 * may accumulate one token per registered NPU of the same variant.
+		 */
+		k_sem_init(s, 0, K_SEM_MAX_LIMIT);
 	}
 	return s;
 }

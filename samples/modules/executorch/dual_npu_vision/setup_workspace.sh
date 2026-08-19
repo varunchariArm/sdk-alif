@@ -6,7 +6,7 @@ workspace=$(CDPATH= cd -- "$sample_dir/../../../../.." && pwd)
 executorch="$workspace/modules/lib/executorch"
 core_driver="$workspace/modules/ethos-u-core-driver-src"
 patch="$sample_dir/patches/executorch-dual-npu.patch"
-expected_core_driver=fe1efeff3381032d459216b63a78f658f100ad75
+required_core_driver=b7cd193afde80afe8bbae9a26d2ca6586554f054
 
 if [ ! -d "$executorch/.git" ]; then
   echo "ExecuTorch checkout not found at $executorch" >&2
@@ -26,15 +26,24 @@ fi
 
 if [ ! -d "$core_driver/.git" ]; then
   echo "Missing $core_driver" >&2
-  echo "Clone the Ethos-U core driver at $expected_core_driver there." >&2
+  echo "Clone the Ethos-U core driver main branch there." >&2
   exit 1
 fi
 
 actual_core_driver=$(git -C "$core_driver" rev-parse HEAD)
-if [ "$actual_core_driver" != "$expected_core_driver" ]; then
-  echo "Warning: Ethos-U core driver is $actual_core_driver" >&2
-  echo "Validated revision is $expected_core_driver" >&2
+actual_core_driver_branch=$(git -C "$core_driver" branch --show-current)
+if [ "$actual_core_driver_branch" != "main" ]; then
+  echo "Ethos-U core driver must be checked out on main, not $actual_core_driver_branch" >&2
+  exit 1
 fi
+if ! git -C "$core_driver" merge-base --is-ancestor \
+  "$required_core_driver" "$actual_core_driver"; then
+  echo "Ethos-U core driver main does not contain $required_core_driver" >&2
+  echo "Fetch the current main branch and try again." >&2
+  exit 1
+fi
+
+echo "Ethos-U core driver main: $actual_core_driver"
 
 if [ ! -d "$workspace/modules/cmsis-nn-src" ]; then
   echo "Missing CMSIS-NN checkout at $workspace/modules/cmsis-nn-src" >&2

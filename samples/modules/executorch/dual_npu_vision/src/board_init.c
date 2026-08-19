@@ -10,7 +10,7 @@
 #include <soc_common.h>
 
 /*
- * Native E8 camera/display setup from Alif PR #879.  This must run directly
+ * Native E8 camera/display setup from the Alif SDK main branch. This must run directly
  * after the SE service (priority 45) and before the camera/DSI devices.
  * Keep both NPU clocks enabled for this dual-NPU variant.
  */
