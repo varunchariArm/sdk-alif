@@ -46,9 +46,9 @@ caches from an older SDK or core-driver branch cannot affect the build:
    git -C modules/cmsis-nn-src checkout \
      d933672e7ca97eec70ef43230baee7b20c2a28ae
 
-Create ``.venv-executorch`` and install the ExecuTorch Python requirements as
-described under `Generating the PTE models`_. Do not copy a previous build
-directory into this workspace.
+Create ``.venv-executorch`` with Python 3.12 and install the ExecuTorch Python
+requirements as described under `Generating the PTE models`_. Do not copy a
+previous build directory into this workspace.
 
 Build
 *****
@@ -171,10 +171,16 @@ standard setup for this workspace:
 
 .. code-block:: console
 
+   python3.12 -m venv .venv-executorch
    cd modules/lib/executorch
    ../../../.venv-executorch/bin/python -m pip install -r requirements-examples.txt
-   ./install_executorch.sh
+   env -u DEBUG ./install_executorch.sh
    cd ../../../
+
+The ``env -u DEBUG`` prefix avoids treating an unrelated host ``DEBUG`` shell
+variable as ExecuTorch's numeric build option. The firmware build does not
+need the optional ``ethos_u`` Python dependency group; Vela is invoked
+separately when regenerating the models.
 
 Generate Vela artifacts from the original fully-int8 TFLite models. Use the
 ``ensemble_vela.ini`` supplied by Alif MLEK and preserve these target settings:
