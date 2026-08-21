@@ -199,8 +199,9 @@ Generate Vela artifacts from the original fully-int8 TFLite models. Use the
      --accelerator-config ethos-u85-256 \
      --optimise Performance \
      --config /path/to/alif-mlek/scripts/vela/ensemble_vela.ini \
-     --system-config Ethos_U85_SRAM_Only \
-     --memory-mode Sram_Only \
+     --system-config Ethos_U85_SRAM_MRAM \
+     --memory-mode Shared_Sram \
+     --output-format raw \
      --output-dir model-artifacts/vww-u85
 
 Create both PTE files from Vela's NPZ files:
@@ -216,10 +217,56 @@ Expected outputs are:
 
 * ``models/yolo_fastest_face_u55_256.pte``: 370,080 bytes, input
   ``1x1x192x192`` int8 and two YOLO output tensors.
-* ``models/vww_u85_256.pte``: 478,560 bytes, input ``1x1x128x128`` int8 and
+* ``models/vww_u85_256.pte``: 353,440 bytes, input ``1x1x128x128`` int8 and
   one two-class output tensor.
+
+Using the same U85 ``Shared_Sram`` profile as the TFLM comparison is
+important.  ``Sram_Only`` embeds a substantially larger weight region and
+does not provide an equivalent payload-size comparison.
 
 The exporters deliberately accept Vela NPZ files instead of silently
 downloading training models. This keeps the original model license and model
 selection explicit. Rebuild the Zephyr application after replacing either PTE
 so ``u85_model.bin`` is repacked.
+
+Size comparison and selective runtime
+*************************************
+
+The application PTEs are completely delegated, so the CMake target does not
+link ExecuTorch's Cortex-M fallback-kernel catalogue. The libraries may still
+be compiled as part of the module build, but the linker discards them. This is
+safe only while every production PTE remains fully delegated.
+
+For the current models, a pristine size-optimized build measures:
+
+.. list-table:: ExecuTorch size improvements
+   :header-rows: 1
+
+   * - Artifact
+     - Previous
+     - Current
+     - Reduction
+   * - Zephyr firmware ``zephyr.bin``
+     - 267,376 bytes
+     - 202,664 bytes
+     - 64,712 bytes
+   * - Packed model/test payload ``u85_model.bin``
+     - 959,286 bytes
+     - 834,166 bytes
+     - 125,120 bytes
+
+The payload reduction comes from compiling VWW with the U85 ``Shared_Sram``
+profile. The firmware reduction comes from omitting unused CPU kernels. An
+``nm`` check of the resulting ELF reports no ``cortex_m::native`` fallback-op
+symbols.
+
+At startup, the U85 command stream and weights are copied to SRAM1 once and
+the U85 core-driver reservation is retained for subsequent frames. This avoids
+re-copying 352 KB of delegate data and re-reserving the same physical NPU on
+every invocation. The U55 path keeps its existing per-invocation reservation.
+
+Against the equivalent local TFLM build, ExecuTorch's packed payload is now
+2,912 bytes smaller (834,166 versus 837,078 bytes). Its firmware remains 41,384
+bytes larger (202,664 versus 161,280 bytes). That residual is framework runtime
+and program-loading/delegate machinery, rather than model weights or unused CPU
+operator kernels.

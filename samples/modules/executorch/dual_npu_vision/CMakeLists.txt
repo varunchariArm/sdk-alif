@@ -15,6 +15,11 @@ set(U85_PTE "${MODEL_DIR}/vww_u85_256.pte")
 set(U55_PTE "${MODEL_DIR}/yolo_fastest_face_u55_256.pte")
 set(FACE_BMP "${MODEL_DIR}/man_and_baby.bmp")
 set(SRAM0_PAYLOAD "${CMAKE_CURRENT_BINARY_DIR}/u85_model.bin")
+file(SIZE "${U85_PTE}" U85_PTE_SIZE)
+file(SIZE "${U55_PTE}" U55_PTE_SIZE)
+file(SIZE "${FACE_BMP}" FACE_BMP_SIZE)
+configure_file(src/model_layout.h.in
+               "${CMAKE_CURRENT_BINARY_DIR}/model_layout.h" @ONLY)
 if(CONFIG_DUAL_ET_LIVE_VISION)
   set(SRAM0_PAYLOAD_INPUTS ${U85_PTE} ${U55_PTE} ${FACE_BMP})
 else()
@@ -42,14 +47,9 @@ target_include_directories(app PRIVATE
   ${EXECUTORCH_ROOT}/examples/arm/executor_runner)
 
 target_link_libraries(app PRIVATE libexecutorch)
-if(CONFIG_CPU_CORTEX_M)
-  if(TARGET cortex_m_ops_lib)
-    target_link_libraries(app PRIVATE cortex_m_ops_lib)
-  endif()
-  if(TARGET cortex_m_kernels)
-    target_link_libraries(app PRIVATE cortex_m_kernels)
-  endif()
-endif()
+# Both programs are completely delegated to Ethos-U.  Do not link the
+# Cortex-M fallback kernel catalogue: doing so retains every registered
+# quantized CPU kernel even though neither PTE can dispatch one.
 if(TARGET executorch_delegate_ethos_u)
   target_link_libraries(app PRIVATE executorch_delegate_ethos_u)
 endif()

@@ -1,0 +1,13 @@
+source "Kconfig.zephyr"
+
+menu "Dual-NPU application"
+
+config DUAL_TFLM_LIVE_VISION
+	bool "Use J16 MT9M114 camera and MW405-C display"
+	default n
+	help
+	  Replace the preloaded BMP with a zero-copy RGB565 camera/display
+	  framebuffer. The J16 selfie camera uses RX D-PHY 0 while the display
+	  uses TX D-PHY 1.
+
+endmenu

@@ -1,11 +1,11 @@
 diff --git a/backends/arm/runtime/EthosUBackend_Cortex_M.cpp b/backends/arm/runtime/EthosUBackend_Cortex_M.cpp
-index 9639876230..a7c709914e 100644
+index 9639876230..75fc9bb92b 100644
 --- a/backends/arm/runtime/EthosUBackend_Cortex_M.cpp
 +++ b/backends/arm/runtime/EthosUBackend_Cortex_M.cpp
 @@ -24,23 +24,17 @@ using executorch::runtime::BackendExecutionContext;
  using executorch::runtime::Error;
  using executorch::runtime::Span;
-
+ 
 -// Compatibility hooks for multi-device driver / non-multi-device driver code
 -// When multi-device driver code is available, these declarations are overridden
 -extern "C" __attribute__((weak)) int ethosu_get_product_config_from_cop_data(
@@ -23,7 +23,7 @@ index 9639876230..a7c709914e 100644
 -  return 0;
 -}
 +    uint32_t* log2_macs_out);
-
+ 
 -extern "C" __attribute__((weak)) struct ethosu_driver* ethosu_reserve_driver_ex(
 -    uint32_t,
 -    uint32_t) {
@@ -32,13 +32,13 @@ index 9639876230..a7c709914e 100644
 +extern "C" struct ethosu_driver* ethosu_reserve_driver_ex(
 +    uint32_t product,
 +    uint32_t log2_macs);
-
+ 
  // Overridable memcpy used by the EthosU backend for output scratch
  // shuffling. Default (weak) implementation in EthosUBackend_IoMemcpy.cpp does
-@@ -48,6 +42,20 @@ extern "C" __attribute__((weak)) struct ethosu_driver* ethosu_reserve_driver_ex(
+@@ -48,10 +42,26 @@ extern "C" __attribute__((weak)) struct ethosu_driver* ethosu_reserve_driver_ex(
  // through a DMA engine) to reduce CPU memcpy load on the host MCU.
  extern "C" void arm_ethos_io_memcpy(void* dst, const void* src, size_t size);
-
+ 
 +extern "C" __attribute__((weak)) int arm_ethos_prepare_invoke_buffers(
 +    uint32_t,
 +    const void**,
@@ -56,7 +56,13 @@ index 9639876230..a7c709914e 100644
  namespace executorch {
  namespace backends {
  namespace arm {
-@@ -74,8 +82,6 @@ Error platform_execute(
+ 
++constexpr uint32_t kEthosUProductU85 = 2U;
++
+ struct PlatformState {};
+ 
+ PlatformState* platform_init(
+@@ -74,8 +84,6 @@ Error platform_execute(
      char* ethosu_scratch) {
    // Parse product config from command stream to reserve the correct driver
    uint32_t product, log2_macs;
@@ -65,15 +71,36 @@ index 9639876230..a7c709914e 100644
    const int product_config_status = ethosu_get_product_config_from_cop_data(
        handles.cmd_data, handles.cmd_data_size, &product, &log2_macs);
    if (product_config_status != 0) { // cppcheck-suppress knownConditionTrueFalse
-@@ -84,6 +90,7 @@ Error platform_execute(
+@@ -83,34 +91,78 @@ Error platform_execute(
+     return Error::InvalidProgram;
    }
-
-   // Allocate driver handle and synchronously invoke driver
+ 
+-  // Allocate driver handle and synchronously invoke driver
++  // Keep the U85 reservation for the lifetime of this embedded application.
++  // The platform has one U85 worker and one physical U85, so releasing and
++  // reserving the same handle around every frame only adds runtime overhead.
++  static ethosu_driver* cached_u85_driver = nullptr;
 +  ET_LOG(Debug, "multidevice reserve product=%u log2_macs=%u", product, log2_macs);
++  ethosu_driver* driver_ptr = nullptr;
++  if (product == kEthosUProductU85) {
++    if (cached_u85_driver == nullptr) {
++      cached_u85_driver = ethosu_reserve_driver_ex(product, log2_macs);
++    }
++    driver_ptr = cached_u85_driver;
++  } else {
++    driver_ptr = ethosu_reserve_driver_ex(product, log2_macs);
++  }
++  auto release_driver = [product](ethosu_driver* driver) {
++    if (product != kEthosUProductU85) {
++      ethosu_release_driver(driver);
++    }
++  };
    auto driver =
-       std::unique_ptr<ethosu_driver, decltype(&ethosu_release_driver)>(
-           ethosu_reserve_driver_ex(product, log2_macs), ethosu_release_driver);
-@@ -91,26 +98,52 @@ Error platform_execute(
+-      std::unique_ptr<ethosu_driver, decltype(&ethosu_release_driver)>(
+-          ethosu_reserve_driver_ex(product, log2_macs), ethosu_release_driver);
++      std::unique_ptr<ethosu_driver, decltype(release_driver)>(
++          driver_ptr, release_driver);
+   if (driver == nullptr) {
      ET_LOG(Error, "ethosu_reserve_driver_ex failed");
      return Error::InvalidState;
    }
@@ -101,7 +128,7 @@ index 9639876230..a7c709914e 100644
 +      handles.weight_data_size,
 +      ethosu_scratch,
 +      handles.scratch_data_size);
-
+ 
    // Ethos-U low level driver expected order for Ethos U-55, we have
    // constant weight data, then scratch (which contains input and output)
    // scratch is written above in this function.
@@ -126,7 +153,7 @@ index 9639876230..a7c709914e 100644
        ETHOSU_NUM_BASE_ADDRS, /* fixed array of pointers to binary interface*/
        nullptr);
 +  ET_LOG(Debug, "multidevice invoke returned product=%u result=%d", product, result);
-
+ 
    if (result != 0) {
      ET_LOG(Error, "Ethos-U invocation failed error (%d)", result);
 diff --git a/runtime/executor/method.cpp b/runtime/executor/method.cpp
@@ -136,7 +163,7 @@ index 8eb4848046..70c4d1643f 100644
 @@ -1159,7 +1159,21 @@ Method::set_input(const EValue& input_evalue, size_t input_idx) {
        input_idx,
        inputs_size());
-
+ 
 -  const auto& e = get_value(get_input_index(input_idx));
 +  auto& e = mutable_value(get_input_index(input_idx));
 +
@@ -153,7 +180,7 @@ index 8eb4848046..70c4d1643f 100644
 +      return Error::Ok;
 +    }
 +  }
-
+ 
    if (!(e.isNone() || e.isTensor() || e.isScalar() || e.isString())) {
  #if ET_LOG_ENABLED
 diff --git a/zephyr/CMakeLists.txt b/zephyr/CMakeLists.txt
@@ -173,9 +200,9 @@ index 6b6970f30c..001290f1f6 100644
 +# - CONFIG_ETHOS_U -> CONFIG_ARM_ETHOS_U (Alif Zephyr driver Kconfig namespace)
 +# - EXECUTORCH_BUILD_KERNELS_QUANTIZED_AOT set to OFF (Zephyr uses -fno-rtti)
 +# - Added CMSIS-NN local path detection from the Zephyr workspace
-
+ 
  if(CONFIG_EXECUTORCH)
-
+ 
 @@ -57,7 +64,7 @@ if(CONFIG_EXECUTORCH)
    if(CONFIG_CPU_CORTEX_A)
      set(EXECUTORCH_BUILD_XNNPACK ON)
@@ -184,4 +211,4 @@ index 6b6970f30c..001290f1f6 100644
 +  if(CONFIG_ARM_ETHOS_U)
      set(EXECUTORCH_BUILD_ARM_BAREMETAL ON)
    endif()
-
+ 

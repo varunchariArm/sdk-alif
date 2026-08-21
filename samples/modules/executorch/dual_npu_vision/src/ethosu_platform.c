@@ -29,12 +29,16 @@ static volatile uint64_t u85_submit_cycle;
 static volatile uint64_t u55_irq_cycle;
 static volatile uint64_t u85_irq_cycle;
 
-#define U85_CMD_MIRROR_SIZE (16 * 1024)
+#define U85_CMD_MIRROR_SIZE (32 * 1024)
 #define U85_WEIGHT_MIRROR_SIZE (512 * 1024)
 static uint8_t u85_cmd_mirror[U85_CMD_MIRROR_SIZE]
 	__attribute__((section(".alif_sram1.u85_mirror"), aligned(32)));
 static uint8_t u85_weight_mirror[U85_WEIGHT_MIRROR_SIZE]
 	__attribute__((section(".alif_sram1.u85_mirror"), aligned(32)));
+static const void *u85_staged_cmd_source;
+static const void *u85_staged_weight_source;
+static size_t u85_staged_cmd_size;
+static size_t u85_staged_weight_size;
 static uint8_t u55_fast_scratch[1536] __aligned(16);
 static uint8_t u85_fast_scratch[1536] __aligned(16);
 
@@ -87,11 +91,27 @@ int arm_ethos_prepare_invoke_buffers(uint32_t product,
 	}
 	if (cmd_size > sizeof(u85_cmd_mirror) ||
 	    weight_size > sizeof(u85_weight_mirror)) {
+		printk("dual-et: U85 invoke buffer overflow cmd=%zu/%zu weights=%zu/%zu\n",
+		       cmd_size, sizeof(u85_cmd_mirror), weight_size,
+		       sizeof(u85_weight_mirror));
 		return -1;
 	}
 
-	memcpy(u85_cmd_mirror, *cmd_data, cmd_size);
-	memcpy(u85_weight_mirror, *weight_data, weight_size);
+	if (*cmd_data != u85_staged_cmd_source ||
+	    *weight_data != u85_staged_weight_source ||
+	    cmd_size != u85_staged_cmd_size ||
+	    weight_size != u85_staged_weight_size) {
+		memcpy(u85_cmd_mirror, *cmd_data, cmd_size);
+		memcpy(u85_weight_mirror, *weight_data, weight_size);
+		sys_cache_data_flush_range(u85_cmd_mirror, cmd_size);
+		sys_cache_data_flush_range(u85_weight_mirror, weight_size);
+		u85_staged_cmd_source = *cmd_data;
+		u85_staged_weight_source = *weight_data;
+		u85_staged_cmd_size = cmd_size;
+		u85_staged_weight_size = weight_size;
+		printk("dual-et: U85 command/weights staged once cmd=%zu weights=%zu\n",
+		       cmd_size, weight_size);
+	}
 	*cmd_data = u85_cmd_mirror;
 	*weight_data = u85_weight_mirror;
 	return 0;

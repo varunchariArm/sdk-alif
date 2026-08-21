@@ -1,0 +1,4 @@
+#pragma once
+#define U85_PTE_SIZE @U85_PTE_SIZE@
+#define U55_PTE_SIZE @U55_PTE_SIZE@
+#define FACE_BMP_SIZE @FACE_BMP_SIZE@

@@ -15,6 +15,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 
+#include "model_layout.h"
+
 #if defined(CONFIG_DUAL_ET_LEGACY_NATIVE_VISION)
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
@@ -81,15 +83,15 @@ constexpr uintptr_t kPayloadStoreAddress = 0x80008000U;
 constexpr uintptr_t kU85PteAddress = 0x02000000U;
 constexpr uintptr_t kPayloadStoreAddress = kU85PteAddress;
 #endif
-constexpr size_t kU85PteSize = 478560;
+constexpr size_t kU85PteSize = U85_PTE_SIZE;
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
 constexpr uintptr_t kU55PteAddress = kPayloadStoreAddress + kU85PteSize;
 #else
 constexpr uintptr_t kU55PteAddress = kU85PteAddress + kU85PteSize;
 #endif
-constexpr size_t kU55PteSize = 370080;
+constexpr size_t kU55PteSize = U55_PTE_SIZE;
 constexpr uintptr_t kFaceBmpAddress = kU55PteAddress + kU55PteSize;
-constexpr size_t kFaceBmpSize = 110646;
+constexpr size_t kFaceBmpSize = FACE_BMP_SIZE;
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
 constexpr uintptr_t kPayloadEndMarkerAddress =
     kFaceBmpAddress + kFaceBmpSize - sizeof(uint32_t);
