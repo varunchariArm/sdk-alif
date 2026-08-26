@@ -1,6 +1,6 @@
 sample:
   name: TFLite Micro dual-NPU live vision
-  description: Parallel U55 face detection and U85 person classification
+  description: Parallel U55 SSD face detection and U85 MobileNetV2 classification
 common:
   tags:
     - samples

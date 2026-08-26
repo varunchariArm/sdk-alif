@@ -16,3 +16,7 @@
 &sram1 {
 	status = "okay";
 };
+
+&aipm_off {
+	vtor-address = <0x80400000>;
+};

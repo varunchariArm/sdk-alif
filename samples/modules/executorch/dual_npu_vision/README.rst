@@ -1,8 +1,11 @@
 Dual-NPU live vision
 ####################
 
-This RTSS-HP sample runs YOLO-Fastest face detection on Ethos-U55 and Visual
-Wake Words on Ethos-U85. It uses the native Zephyr MT9M114, ISP and MW405
+This RTSS-HP sample runs a trained SSD-Slim face detector on Ethos-U55 and a
+trained torchvision MobileNetV2 image classifier on
+Ethos-U85. Both PyTorch models are quantized and lowered directly through the
+ExecuTorch Ethos-U backend; no TFLite model or Vela NPZ wrapper is used. It
+uses the native Zephyr MT9M114, ISP and MW405
 drivers on the Alif SDK ``main`` branch. The MT9M114 and MW405 support landed
 through Alif PR #879; no MLEK camera or display bridge is linked.
 
@@ -96,7 +99,7 @@ Outputs
 
 * ``build-dual-npu-vision/zephyr/zephyr.bin``
 * ``build-dual-npu-vision/zephyr/zephyr.elf``
-* ``build-dual-npu-vision/u85_model.bin`` (both PTEs and startup BMP)
+* ``build-dual-npu-vision/model_assets.bin`` (both PTEs, labels, startup BMP)
 
 Package and flash
 *****************
@@ -111,7 +114,7 @@ the toolkit:
    APP=$PWD/sdk-alif/samples/modules/executorch/dual_npu_vision
 
    cp build-dual-npu-vision/zephyr/zephyr.bin \
-      build-dual-npu-vision/u85_model.bin \
+      build-dual-npu-vision/model_assets.bin \
       "$ALIF_SE_TOOLS_DIR/build/images/"
    cp "$APP/flash/dual-npu-vision.json" \
       "$ALIF_SE_TOOLS_DIR/build/config/"
@@ -131,15 +134,16 @@ port at 115200 baud, and reset the board.
 Runtime behavior
 ****************
 
-At startup the application runs both models once using the bundled
-``man_and_baby.bmp`` test image. After five seconds it switches to the live
-MT9M114 stream. The ISP produces RGB888 frames, which are resized separately
-for YOLO (192x192 grayscale) and VWW (128x128 RGB). Dedicated Zephyr worker
-threads submit U55 and U85 work in parallel.
+At startup the application runs both models once using the bundled Grace
+Hopper test image. After five seconds it switches to the live MT9M114 stream.
+The ISP produces RGB888 frames, which are resized separately for SSD-Slim
+(160x120 grayscale) and MobileNetV2 (224x224 RGB). Dedicated Zephyr worker threads
+submit U55 and U85 work in parallel.
 
-The MW405 UI shows a 352x352 live preview, YOLO face boxes, person/face status,
-and rolling U55/U85/span timing summaries. Video buffers are returned to the
-ISP queue after processing so capture can run continuously.
+The MW405 UI shows a 352x352 live preview, face-detection boxes, the current
+classification label and confidence, and rolling U55/U85/span timing
+summaries. Video buffers are returned to the ISP queue after processing so
+capture can run continuously.
 
 Workspace dependencies
 **********************
@@ -160,10 +164,11 @@ the ExecuTorch module checkout.
 Generating the PTE models
 *************************
 
-The checked-in PTE files are generated in two stages. First, Vela compiles the
-quantized TFLite network for the target NPU and emits an ``*_vela.npz`` file.
-Second, the scripts in ``tools/`` serialize that command stream and its tensor
-contract as an ExecuTorch program.
+The checked-in PTE files are generated directly from trained torchvision
+checkpoints. ``export_torchvision_models.py`` performs PT2E quantization,
+calibration, ExecuTorch Ethos-U partitioning, and Vela compilation. The
+exporter rejects a model unless its graph contains exactly one Ethos-U
+delegate and no CPU fallback operators.
 
 Prepare ExecuTorch's Python tools from the workspace root. The exact setup
 options can vary with the pinned ExecuTorch revision; the following is the
@@ -182,91 +187,76 @@ variable as ExecuTorch's numeric build option. The firmware build does not
 need the optional ``ethos_u`` Python dependency group; Vela is invoked
 separately when regenerating the models.
 
-Generate Vela artifacts from the original fully-int8 TFLite models. Use the
-``ensemble_vela.ini`` supplied by Alif MLEK and preserve these target settings:
+Download the trained public SSD-Slim artifact and the official torchvision
+MobileNetV2 checkpoint. Importing the SSD constants produces the common
+PyTorch checkpoint consumed by both backend exporters:
 
 .. code-block:: console
 
-   vela yolo-fastest_192_face_v4.tflite \
-     --accelerator-config ethos-u55-256 \
-     --optimise Performance \
-     --config /path/to/alif-mlek/scripts/vela/ensemble_vela.ini \
-     --system-config RTSS_HP_SRAM_MRAM \
-     --memory-mode Shared_Sram \
-     --output-dir model-artifacts/yolo-u55
+   curl -L -o ssd_slim_source.tflite \
+     https://raw.githubusercontent.com/emza-vs/ModelZoo/master/Models/Object_detection/SSD/ssd_slim_120x160x1_v1_int8.tflite
+   curl -L -o mobilenet_v2.pth \
+     https://download.pytorch.org/models/mobilenet_v2-7ebf99e0.pth
 
-   vela vww4_128_128_INT8.tflite \
-     --accelerator-config ethos-u85-256 \
-     --optimise Performance \
-     --config /path/to/alif-mlek/scripts/vela/ensemble_vela.ini \
-     --system-config Ethos_U85_SRAM_MRAM \
-     --memory-mode Shared_Sram \
-     --output-format raw \
-     --output-dir model-artifacts/vww-u85
+   APP=$PWD/sdk-alif/samples/modules/executorch/dual_npu_vision
+   ./.venv-executorch/bin/python "$APP/tools/import_ssd_slim_tflite.py" \
+     --source ssd_slim_source.tflite \
+     --output comparable_ssd_slim.pth
 
-Create both PTE files from Vela's NPZ files:
+Generate both PTE files using Alif MLEK's ``ensemble_vela.ini`` memory-system
+definitions:
 
 .. code-block:: console
 
    APP=$PWD/sdk-alif/samples/modules/executorch/dual_npu_vision
    "$APP/tools/generate_pte_models.sh" \
-     model-artifacts/yolo-u55/yolo-fastest_192_face_v4_vela.npz \
-     model-artifacts/vww-u85/vww4_128_128_INT8_vela.npz
+     /path/to/alif-mlek/scripts/vela/ensemble_vela.ini \
+     comparable_ssd_slim.pth \
+     mobilenet_v2.pth
 
 Expected outputs are:
 
-* ``models/yolo_fastest_face_u55_256.pte``: 370,080 bytes, input
-  ``1x1x192x192`` int8 and two YOLO output tensors.
-* ``models/vww_u85_256.pte``: 353,440 bytes, input ``1x1x128x128`` int8 and
-  one two-class output tensor.
+* ``models/comparable_ssd_slim_u55.pte``: input ``1x1x120x160`` int8 and raw
+  box-delta/two-class-logit tensors targeting Ethos-U55-256.
+* ``models/mobilenet_v2_imagenet_u85.pte``: input ``1x3x224x224`` int8 and a
+  1000-class probability tensor targeting Ethos-U85-256.
+* ``models/labels_imagenet_1000.txt``: torchvision's matching ImageNet labels.
 
-Using the same U85 ``Shared_Sram`` profile as the TFLM comparison is
-important.  ``Sram_Only`` embeds a substantially larger weight region and
-does not provide an equivalent payload-size comparison.
+Both PTEs expose int8 inputs and outputs and contain one Ethos-U delegate with
+no CPU fallback. Rebuild after replacing either PTE; CMake watches the model
+files and regenerates the compiled MRAM offsets automatically.
 
-The exporters deliberately accept Vela NPZ files instead of silently
-downloading training models. This keeps the original model license and model
-selection explicit. Rebuild the Zephyr application after replacing either PTE
-so ``u85_model.bin`` is repacked.
-
-Size comparison and selective runtime
-*************************************
+Runtime and artifact size
+*************************
 
 The application PTEs are completely delegated, so the CMake target does not
 link ExecuTorch's Cortex-M fallback-kernel catalogue. The libraries may still
 be compiled as part of the module build, but the linker discards them. This is
 safe only while every production PTE remains fully delegated.
 
-For the current models, a pristine size-optimized build measures:
+For the validated comparable models, the current pristine build measures:
 
-.. list-table:: ExecuTorch size improvements
+.. list-table:: ExecuTorch artifacts
    :header-rows: 1
 
    * - Artifact
-     - Previous
-     - Current
-     - Reduction
+     - Size
    * - Zephyr firmware ``zephyr.bin``
-     - 267,376 bytes
-     - 202,664 bytes
-     - 64,712 bytes
-   * - Packed model/test payload ``u85_model.bin``
-     - 959,286 bytes
-     - 834,166 bytes
-     - 125,120 bytes
+     - 203,084 bytes
+   * - Combined model/test payload
+     - 3,888,654 bytes
+   * - U55 SSD-Slim PTE
+     - 296,896 bytes
+   * - U85 MobileNetV2 PTE
+     - 3,470,624 bytes
 
-The payload reduction comes from compiling VWW with the U85 ``Shared_Sram``
-profile. The firmware reduction comes from omitting unused CPU kernels. An
-``nm`` check of the resulting ELF reports no ``cortex_m::native`` fallback-op
-symbols.
+An ``nm`` check of the resulting ELF reports no ``cortex_m::native``
+fallback-op symbols.
 
-At startup, the U85 command stream and weights are copied to SRAM1 once and
-the U85 core-driver reservation is retained for subsequent frames. This avoids
-re-copying 352 KB of delegate data and re-reserving the same physical NPU on
-every invocation. The U55 path keeps its existing per-invocation reservation.
+Both exported memory plans and their retained int8 inputs fit the statically
+reserved method pools; the five-buffer Zephyr video pool remains separately
+allocated in SRAM0.
 
-Against the equivalent local TFLM build, ExecuTorch's packed payload is now
-2,912 bytes smaller (834,166 versus 837,078 bytes). Its firmware remains 41,384
-bytes larger (202,664 versus 161,280 bytes). That residual is framework runtime
-and program-loading/delegate machinery, rather than model weights or unused CPU
-operator kernels.
+The model payload starts at ``0x80008000`` and the HP firmware executes from
+``0x80400000``. The package keeps the payload below the firmware and within
+the validated E8 MRAM window.

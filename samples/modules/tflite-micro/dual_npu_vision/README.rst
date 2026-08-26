@@ -1,33 +1,32 @@
 TFLite Micro dual-NPU live vision
 #################################
 
-This sample is the TFLite Micro counterpart of
-``samples/modules/executorch/dual_npu_vision``. Both applications run the
-same quantized networks and native Zephyr camera, ISP, display, and Ethos-U
-core-driver paths:
+This sample demonstrates two different vision workloads running concurrently
+through TFLite Micro while sharing the native Zephyr camera, ISP, display, and
+multi-variant Ethos-U core-driver paths:
 
-* YOLO-Fastest face detection on Ethos-U55-256
-* Visual Wake Words person classification on Ethos-U85-256
+* SSD-Slim face detection (120x160 grayscale) on Ethos-U55-256
+* MobileNetV2 ImageNet classification (224x224 RGB) on Ethos-U85-256
 * MT9M114 camera on J16 and MW405 480x800 display
 * one Zephyr worker thread per NPU, released concurrently
 
-The difference under test is the runtime backend and model container. This
-sample uses Vela-compiled ``.tflite`` files and TFLite Micro. The sibling
-sample uses ExecuTorch ``.pte`` files.
+The U55 receives the smaller detector, while the higher-throughput U85 runs
+the substantially larger classifier. This pairing demonstrates heterogeneous
+workload placement rather than assigning both NPUs copies of one task.
 
 Model provenance
 ****************
 
-The ExecuTorch PTE files are not produced independently of TFLite. The model
-flow used by the sibling sample is:
-
-``quantized .tflite -> Vela command stream -> ExecuTorch .pte``
-
-Therefore TFLite is an offline source artifact for PTE generation. At run
-time, however, the ExecuTorch firmware neither links TFLite Micro nor reads a
-``.tflite`` file. This sample deliberately uses the same Vela-compiled
-networks so timing and memory comparisons isolate the runtime backend as much
-as possible.
+Both artifacts are generated from the same PyTorch checkpoints used by the
+ExecuTorch comparison build. SSD-Slim imports the trained weights from the
+emza-vs model and exposes raw box deltas and two-class logits. MobileNetV2 uses
+the official torchvision ImageNet checkpoint and exposes 1000 raw logits.
+TensorFlow Lite conversion performs full integer quantization, and Vela then
+compiles the models for U55-256 and U85-256 respectively. Detector softmax,
+anchor decoding, and NMS remain in common application postprocessing. The
+TFLite MobileNetV2 carries its output Softmax in the delegated graph, while
+the ExecuTorch application applies Softmax after ``method->execute()``; use
+NPU PMU counters when isolating that operator from backend overhead.
 
 Create a clean workspace
 ************************
@@ -58,22 +57,30 @@ multi-variant core driver from its main branch.
 Generate the models
 *******************
 
-The validated Vela outputs are checked into ``models/``. To regenerate them
-from the MLEK resource definitions, enable the ``alif-mlek`` west project and
-run the helper with a Python environment suitable for MLEK (Python 3.12 was
-used for the checked-in artifacts):
+The validated Vela outputs are checked into ``models/``. To regenerate them,
+enable the ``alif-mlek`` west project and use Python 3.12 with PyTorch,
+torchvision, TensorFlow, and AI Edge Torch installed:
 
 .. code-block:: console
 
    west config manifest.project-filter +tflite-micro,+alif-mlek
    west update
-   PYTHON=/path/to/python3.12 \
+   PYTHON=/path/to/model-venv/bin/python VELA=/path/to/vela \
      ./sdk-alif/samples/modules/tflite-micro/dual_npu_vision/tools/generate_tflite_models.sh
 
-The helper selects ``H256`` for YOLO/U55 and ``Z256`` for VWW/U85. Vela embeds
-the target product configuration in each TFLite custom operator. The
-multi-variant core driver reads that metadata and reserves the matching NPU;
-the application does not select a device by thread order.
+The helper downloads the public trained SSD-Slim artifact and official
+torchvision MobileNetV2 checkpoint. It imports SSD-Slim into the shared
+PyTorch topology, transfers MobileNetV2 into an equivalent native-NHWC Keras
+graph, performs full-int8 conversion, and compiles the models for
+``ethos-u55-256`` and ``ethos-u85-256``. Vela embeds the target product
+configuration in each TFLite custom operator. The multi-variant core driver
+reads that metadata and reserves the matching NPU.
+
+The production artifacts are:
+
+* ``comparable_ssd_slim_u55_256.tflite``: 296,816 bytes
+* ``mobilenet_v2_imagenet_u85_256.tflite``: 3,489,616 bytes
+* ``labels_imagenet_1000.txt`` and ``grace_hopper.bmp``
 
 Build
 *****
@@ -120,13 +127,20 @@ Package and flash
 Runtime and comparison
 **********************
 
-At startup both models run once on ``man_and_baby.bmp``. Five seconds later
-the application starts the live pipeline. The display shows the camera
-preview, face boxes, person/face state, and a 16-frame rolling timing summary.
-The serial log uses the ``dual-tflm:`` prefix.
+At startup both models run once on ``grace_hopper.bmp``, a square crop of
+TensorFlow's standard Grace Hopper classification example. It provides one
+large frontal face for SSD and a naval uniform that MobileNetV2 can classify
+reliably. The source photograph is a public-domain U.S. Navy image; the test
+asset is distributed by TensorFlow under its Apache-2.0 repository.
 
-For a backend comparison, build the sibling ExecuTorch sample with the same
-SDK, overlays, core-driver revision, compiler, and optimization level. Compare:
+Five seconds later the application starts the live pipeline. The display
+shows the camera preview, SSD face boxes and count, the top MobileNetV2 class
+and confidence, and a 16-frame rolling timing summary. The serial log uses the
+``dual-tflm:`` prefix.
+
+For a backend comparison, use equivalent networks and preprocessing with the
+same SDK, overlays, core-driver revision, compiler, and optimization level.
+Compare:
 
 * U55, U85, span, and overlap timings printed by each application
 * ``zephyr.bin`` and ``zephyr.elf`` sizes

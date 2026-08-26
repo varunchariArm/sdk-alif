@@ -210,34 +210,7 @@ static void reload_display(void)
 	sys_cache_data_flush_range(framebuffer, DISPLAY_WIDTH * DISPLAY_HEIGHT * 2U);
 }
 
-static void show_result_tile(uint32_t xoff, int positive, uint8_t positive_char)
-{
-	const uint16_t color = positive ? 0x07e0 : 0xf800;
-	static const uint8_t glyph_p[7] = {0x1e,0x11,0x11,0x1e,0x10,0x10,0x10};
-	static const uint8_t glyph_f[7] = {0x1f,0x10,0x10,0x1e,0x10,0x10,0x10};
-	static const uint8_t glyph_n[7] = {0x11,0x19,0x19,0x15,0x13,0x13,0x11};
-	ARG_UNUSED(glyph_n);
-	const uint8_t *glyph = positive_char == 'P' ? glyph_p : glyph_f;
-	for (uint32_t y = 16; y < 72; ++y)
-		for (uint32_t x = xoff; x < xoff + 56U; ++x)
-			framebuffer[y * DISPLAY_WIDTH + x] = color;
-	for (uint32_t row = 0; row < 7; ++row)
-		for (uint32_t col = 0; col < 5; ++col)
-			if (glyph[row] & BIT(4U - col))
-				for (uint32_t dy = 0; dy < 6; ++dy)
-					for (uint32_t dx = 0; dx < 6; ++dx)
-						framebuffer[(23U + row * 6U + dy) * DISPLAY_WIDTH +
-							xoff + 13U + col * 6U + dx] = 0;
-	reload_display();
-}
-
-void zephyr_dual_show_vww_result(int person) { show_result_tile(24U, person, 'P'); }
-void zephyr_dual_show_yolo_result(int faces) { show_result_tile(96U, faces > 0, 'F'); }
-void zephyr_dual_reset_results(void)
-{
-	zephyr_dual_show_vww_result(0);
-	zephyr_dual_show_yolo_result(0);
-}
+static void summary_text(uint32_t x, uint32_t y, const char *text, uint16_t color);
 void zephyr_dual_clear_display(void)
 {
 	memset(framebuffer, 0, DISPLAY_WIDTH * DISPLAY_HEIGHT * 2U);
@@ -251,16 +224,20 @@ static const uint8_t *summary_glyph(char c)
 		{30,1,1,14,1,1,30},{2,6,10,18,31,2,2},{31,16,16,30,1,1,30},
 		{14,16,16,30,17,17,14},{31,1,2,4,8,8,8},{14,17,17,14,17,17,14},
 		{14,17,17,15,1,1,14}};
-	static const uint8_t A[7]={14,17,17,31,17,17,17}, G[7]={14,17,16,23,17,17,15};
-	static const uint8_t L[7]={16,16,16,16,16,16,31}, N[7]={17,25,25,21,19,19,17};
-	static const uint8_t O[7]={14,17,17,17,17,17,14}, P[7]={30,17,17,30,16,16,16};
-	static const uint8_t R[7]={30,17,17,30,20,18,17}, S[7]={15,16,16,14,1,1,30};
-	static const uint8_t U[7]={17,17,17,17,17,17,14}, V[7]={17,17,17,17,17,10,4};
+	static const uint8_t letters[26][7] = {
+		{14,17,17,31,17,17,17},{30,17,17,30,17,17,30},{14,17,16,16,16,17,14},
+		{30,17,17,17,17,17,30},{31,16,16,30,16,16,31},{31,16,16,30,16,16,16},
+		{14,17,16,23,17,17,15},{17,17,17,31,17,17,17},{14,4,4,4,4,4,14},
+		{1,1,1,1,17,17,14},{17,18,20,24,20,18,17},{16,16,16,16,16,16,31},
+		{17,27,21,21,17,17,17},{17,25,25,21,19,19,17},{14,17,17,17,17,17,14},
+		{30,17,17,30,16,16,16},{14,17,17,17,21,18,13},{30,17,17,30,20,18,17},
+		{15,16,16,14,1,1,30},{31,4,4,4,4,4,4},{17,17,17,17,17,17,14},
+		{17,17,17,17,17,10,4},{17,17,17,21,21,21,10},{17,17,10,4,10,17,17},
+		{17,17,10,4,4,4,4},{31,1,2,4,8,16,31}};
 	static const uint8_t blank[7]={0};
 	if (c >= '0' && c <= '9') return digits[c - '0'];
-	switch (c) { case 'A': return A; case 'G': return G; case 'L': return L;
-	case 'N': return N; case 'O': return O; case 'P': return P; case 'R': return R;
-	case 'S': return S; case 'U': return U; case 'V': return V; default: return blank; }
+	if (c >= 'A' && c <= 'Z') return letters[c - 'A'];
+	return blank;
 }
 
 static void summary_text(uint32_t x, uint32_t y, const char *text, uint16_t color)
@@ -275,6 +252,32 @@ static void summary_text(uint32_t x, uint32_t y, const char *text, uint16_t colo
 						for (uint32_t dx=0; dx<scale; ++dx)
 							framebuffer[(y+row*scale+dy)*DISPLAY_WIDTH+x+col*scale+dx]=color;
 	}
+}
+
+void zephyr_dual_show_ssd_result(int faces)
+{
+	char line[24];
+	for (uint32_t y = 12U; y < 38U; ++y)
+		memset(framebuffer + y * DISPLAY_WIDTH, 0, DISPLAY_WIDTH * sizeof(*framebuffer));
+	snprintf(line, sizeof(line), "U55 SSD F %d", faces);
+	summary_text(18U, 14U, line, faces > 0 ? 0x07e0 : 0xffff);
+	reload_display();
+}
+
+void zephyr_dual_show_classification(int class_id, int confidence, const char *label)
+{
+	char line[28];
+	for (uint32_t y = 42U; y < 70U; ++y)
+		memset(framebuffer + y * DISPLAY_WIDTH, 0, DISPLAY_WIDTH * sizeof(*framebuffer));
+	snprintf(line, sizeof(line), "U85 %s %d", label && label[0] ? label : "CLASS", confidence);
+	summary_text(18U, 44U, line, class_id >= 0 ? 0x07ff : 0xffff);
+	reload_display();
+}
+
+void zephyr_dual_reset_results(void)
+{
+	zephyr_dual_show_ssd_result(0);
+	zephyr_dual_show_classification(-1, 0, "CLASS");
 }
 
 void zephyr_dual_show_parallel_summary(uint32_t samples, uint32_t u55_us,

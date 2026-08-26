@@ -19,7 +19,7 @@
     "binary": "zephyr.bin",
     "version": "1.0.0",
     "signed": true,
-    "mramAddress": "0x80200000",
+    "mramAddress": "0x80400000",
     "cpu_id": "M55_HP",
     "flags": ["boot"]
   },
@@ -34,7 +34,7 @@
   },
   "U85MOD": {
     "disabled": false,
-    "binary": "u85_model.bin",
+    "binary": "model_assets.bin",
     "version": "1.0.0",
     "mramAddress": "0x80008000",
     "signed": false,

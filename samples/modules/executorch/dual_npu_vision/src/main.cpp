@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
+#include <algorithm>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -63,40 +64,39 @@ unsigned char* ethosu_fast_scratch = ethosu_dtcm_scratch;
 
 namespace {
 
-constexpr size_t kU55MethodPoolSize = 192 * 1024;
+/* Retained inputs are allocated after the method-planned buffers. */
+constexpr size_t kU55MethodPoolSize = 640 * 1024;
 constexpr size_t kMethodMetadataPoolSize = 4096;
-// The U85 model uses 1,509,968 bytes of NPU scratch starting at 0x02400000.
-// Keep the ExecuTorch method pool above that range; otherwise inference
-// corrupts the loaded Program FlatBuffer before its first instruction.
-// Measured persistent use is 1,355,433 bytes. Keep 52 KiB of margin while
-// preserving the full 2 MiB temporary arena required by load_method().
-constexpr size_t kU85MethodPoolSize = 256 * 1024;
-constexpr size_t kU55TempPoolSize = 384 * 1024;
-constexpr size_t kU85TempPoolSize = 2 * 1024 * 1024;
-enum class Workload { FaceDetection, VisualWakeWord };
+// Leave headroom for the exported memory plans, retained inputs, and
+// allocator alignment.
+/* MobileNetV2 needs 150,912 bytes of planned storage plus its 150,528-byte
+ * retained input. */
+constexpr size_t kU85MethodPoolSize = 304 * 1024;
+constexpr size_t kU55TempPoolSize = 3686400;
+constexpr size_t kU85TempPoolSize = 1509968;
+enum class Workload { FaceDetection, ImageClassification };
 
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
-/* Keep the compact payload in MRAM. VWW is staged into the U55 load-time
- * DTCM arena after YOLO preparation, avoiding inaccessible shared SRAM. */
-constexpr uintptr_t kPayloadStoreAddress = 0x80008000U;
+/* Match the proven TFLM package: one payload below the XIP firmware. */
+constexpr uintptr_t kU85PteAddress = 0x80008000U;
 #else
 constexpr uintptr_t kU85PteAddress = 0x02000000U;
 constexpr uintptr_t kPayloadStoreAddress = kU85PteAddress;
 #endif
 constexpr size_t kU85PteSize = U85_PTE_SIZE;
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
-constexpr uintptr_t kU55PteAddress = kPayloadStoreAddress + kU85PteSize;
+constexpr uintptr_t kU55PteAddress = kU85PteAddress + kU85PteSize;
 #else
 constexpr uintptr_t kU55PteAddress = kU85PteAddress + kU85PteSize;
 #endif
 constexpr size_t kU55PteSize = U55_PTE_SIZE;
 constexpr uintptr_t kFaceBmpAddress = kU55PteAddress + kU55PteSize;
 constexpr size_t kFaceBmpSize = FACE_BMP_SIZE;
+constexpr uintptr_t kClassLabelsAddress = kFaceBmpAddress + kFaceBmpSize;
+constexpr size_t kClassLabelsSize = CLASS_LABELS_SIZE;
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
-constexpr uintptr_t kPayloadEndMarkerAddress =
-    kFaceBmpAddress + kFaceBmpSize - sizeof(uint32_t);
-constexpr uint32_t kPayloadEndMarker = 0x53492547U;
-constexpr size_t kPayloadSize = kU85PteSize + kU55PteSize + kFaceBmpSize;
+constexpr size_t kModelPayloadSize = kU85PteSize + kU55PteSize +
+                                     kFaceBmpSize + kClassLabelsSize;
 constexpr size_t kLiveWidth = 480;
 constexpr size_t kLiveHeight = 352;
 constexpr size_t kLiveFrameSize = kLiveWidth * kLiveHeight * 2;
@@ -105,31 +105,27 @@ constexpr size_t kCameraHeight = 560;
 constexpr size_t kCameraFrameSize = kCameraWidth * kCameraHeight * 2;
 /* SRAM1 layout: 1 MiB U85 temp, 2 MiB U85 method, then camera frame. */
 #else
-constexpr uintptr_t kPayloadEndMarkerAddress =
-    kFaceBmpAddress + kFaceBmpSize - sizeof(uint32_t);
 constexpr uint32_t kFaceBmpHeader = 0xb0364d42U;
-constexpr uint32_t kPayloadEndMarker = 0x53492547U;
 constexpr size_t kPayloadSize = kU85PteSize + kU55PteSize + kFaceBmpSize;
 #endif
 const unsigned char* const model_u55_pte =
     reinterpret_cast<const unsigned char*>(kU55PteAddress);
 
+alignas(16)
 unsigned char u55_method_pool[kU55MethodPoolSize];
 alignas(16) unsigned char u55_metadata_pool[kMethodMetadataPoolSize];
 alignas(16) unsigned char u85_metadata_pool[kMethodMetadataPoolSize];
 __attribute__((section(".alif_sram1.tensor_arena"), aligned(16)))
 unsigned char u85_method_pool[kU85MethodPoolSize];
 
-/* The validated YOLO build requires its large scratch arena in HP DTCM. */
-alignas(32)
+/* Keep each delegate scratch arena in memory visible to its NPU. */
+__attribute__((section(".alif_sram0.npu_scratch"), aligned(32)))
 unsigned char u55_temp_pool[kU55TempPoolSize];
 __attribute__((section(".alif_sram1.tensor_arena"), aligned(16)))
 unsigned char u85_temp_pool[kU85TempPoolSize];
 
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
-/* ExecuTorch parses VWW directly from MRAM. The platform hook mirrors only
- * its delegated command/weight blocks into U85-visible SRAM1. */
-constexpr uintptr_t kU85PteAddress = kPayloadStoreAddress;
+/* ExecuTorch parses MobileNetV2 directly from U85-visible MRAM. */
 const unsigned char* const model_u85_pte =
     reinterpret_cast<const unsigned char*>(kU85PteAddress);
 #else
@@ -370,8 +366,9 @@ extern "C" int zephyr_dual_release_frame(void);
 extern "C" uint16_t* zephyr_dual_preview_buffer(void);
 extern "C" void zephyr_dual_get_rgb(
     uint32_t x, uint32_t y, uint8_t* red, uint8_t* green, uint8_t* blue);
-extern "C" void zephyr_dual_show_vww_result(int person);
-extern "C" void zephyr_dual_show_yolo_result(int faces);
+extern "C" void zephyr_dual_show_ssd_result(int faces);
+extern "C" void zephyr_dual_show_classification(
+    int class_id, int confidence, const char* label);
 extern "C" void zephyr_dual_reset_results(void);
 extern "C" void zephyr_dual_clear_display(void);
 extern "C" void zephyr_dual_show_parallel_summary(
@@ -417,6 +414,11 @@ K_SEM_DEFINE(u85_start_sem, 0, 1);
 K_SEM_DEFINE(execute_ready_sem, 0, 2);
 K_SEM_DEFINE(u55_execute_go_sem, 0, 1);
 K_SEM_DEFINE(u85_execute_go_sem, 0, 1);
+/* CPU-side resize/copy is performed before these gates.  Releasing both gates
+ * together lets the two independent Ethos-U delegates submit to U55 and U85
+ * without the higher-priority input-preparation worker serializing them. */
+K_SEM_DEFINE(u55_npu_launch_sem, 0, 1);
+K_SEM_DEFINE(u85_npu_launch_sem, 0, 1);
 K_SEM_DEFINE(done_sem, 0, 2);
 K_SEM_DEFINE(input_copied_sem, 0, 2);
 volatile int execute_status[2] = {-1, -1};
@@ -424,52 +426,49 @@ volatile uint64_t execute_start_cycles[2];
 volatile uint64_t execute_end_cycles[2];
 volatile uint64_t prepare_start_cycles[2];
 volatile uint64_t prepare_ready_cycles[2];
-volatile bool latest_vww_person;
+volatile int latest_class_id = -1;
+volatile int latest_class_confidence;
+char latest_class_label[20];
 
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
+void populate_model_input(int8_t* image, size_t bytes, Workload workload) {
+  const size_t width = workload == Workload::FaceDetection ? 160U : 224U;
+  const size_t height = workload == Workload::FaceDetection ? 120U : 224U;
+  const size_t channels = workload == Workload::FaceDetection ? 1U : 3U;
+  if (bytes != width * height * channels) return;
+  const size_t plane = width * height;
+  for (size_t y = 0; y < height; ++y) {
+    const size_t source_y = y * kLiveHeight / height;
+    for (size_t x = 0; x < width; ++x) {
+      const size_t source_x = x * kLiveWidth / width;
+      uint8_t red, green, blue;
+      live_rgb(source_x, source_y, red, green, blue);
+      const size_t index = y * width + x;
+      if (workload == Workload::FaceDetection) {
+        const int gray = static_cast<int>(
+            (77U * red + 150U * green + 29U * blue) >> 8);
+        image[index] = static_cast<int8_t>(gray - 128);
+      } else {
+        image[index] = static_cast<int8_t>(static_cast<int>(red) - 128);
+        image[plane + index] =
+            static_cast<int8_t>(static_cast<int>(green) - 128);
+        image[2U * plane + index] =
+            static_cast<int8_t>(static_cast<int>(blue) - 128);
+      }
+    }
+  }
+}
+
 void refresh_live_input(EValue& retained_input, Workload workload) {
   if (!retained_input.isTensor()) return;
   Tensor tensor = retained_input.toTensor();
   if (tensor.scalar_type() != ScalarType::Char) return;
   int8_t* image = tensor.mutable_data_ptr<int8_t>();
-  const size_t side = workload == Workload::FaceDetection ? 192U : 128U;
-  for (size_t y = 0; y < side; ++y) {
-    const size_t source_y = y * kLiveHeight / side;
-    for (size_t x = 0; x < side; ++x) {
-      const size_t source_x = x * kLiveWidth / side;
-      uint8_t red, green, blue;
-      live_rgb(source_x, source_y, red, green, blue);
-      const int gray = static_cast<int>(
-          (77U * red + 150U * green + 29U * blue) >> 8);
-      if (workload == Workload::FaceDetection) {
-        image[y * side + x] = static_cast<int8_t>(gray - 128);
-      } else {
-        /* VWW input: real=uint8/255, scale=0.00813783, zero point=-70. */
-        int quantized = static_cast<int>(
-            roundf((gray / 255.0f) / 0.00813783f)) - 70;
-        quantized = quantized < -128 ? -128 :
-                    (quantized > 127 ? 127 : quantized);
-        image[y * side + x] = static_cast<int8_t>(quantized);
-      }
-    }
-  }
+  populate_model_input(image, tensor.nbytes(), workload);
   /* The Ethos-U masters do not snoop the M55 data cache.  Without cleaning
    * this range, method->execute() can keep consuming the startup-test tensor
    * even though the CPU has populated it from a new camera frame. */
   sys_cache_data_flush_range(image, tensor.nbytes());
-
-  static uint32_t refresh_count[2];
-  const size_t slot = workload == Workload::FaceDetection ? 0U : 1U;
-  const uint32_t count = ++refresh_count[slot];
-  if (count < 14U || (count % 30U) == 0U) {
-    uint32_t checksum = 2166136261U;
-    for (size_t i = 0; i < tensor.nbytes(); ++i)
-      checksum = (checksum ^ static_cast<uint8_t>(image[i])) * 16777619U;
-    printk("dual-et: %s input mode=%s checksum=%08x samples=%d/%d/%d\n",
-           workload == Workload::FaceDetection ? "U55" : "U85",
-           use_test_image ? "TEST" : "LIVE", checksum,
-           image[0], image[tensor.nbytes() / 2U], image[tensor.nbytes() - 1U]);
-  }
 }
 #endif
 
@@ -514,74 +513,16 @@ Error prepare_inputs(Method& method,
     }
     const uint8_t* pixels = bmp + 54;
 #endif
-    if (workload == Workload::FaceDetection &&
-        info->scalar_type() == ScalarType::Char &&
-        elements == 192 * 192) {
+    const size_t width = workload == Workload::FaceDetection ? 160U : 224U;
+    const size_t height = workload == Workload::FaceDetection ? 120U : 224U;
+    const size_t channels = workload == Workload::FaceDetection ? 1U : 3U;
+    if (info->scalar_type() == ScalarType::Char &&
+        elements == channels * width * height) {
       int8_t* image = static_cast<int8_t*>(data);
-      for (size_t y = 0; y < 192; ++y) {
-#if defined(CONFIG_DUAL_ET_LIVE_VISION)
-        const size_t source_y = y * kLiveHeight / 192;
-#else
-        const size_t source_y = 191 - y;
-#endif
-        for (size_t x = 0; x < 192; ++x) {
-#if defined(CONFIG_DUAL_ET_LIVE_VISION)
-          const size_t source_x = x * kLiveWidth / 192;
-          uint8_t red, green, blue;
-          live_rgb(source_x, source_y, red, green, blue);
-          const unsigned gray =
-              (77U * red + 150U * green + 29U * blue) >> 8;
-#else
-          const size_t source = (source_y * 192 + x) * 3;
-          const unsigned gray =
-              (77U * pixels[source + 2] + 150U * pixels[source + 1] +
-               29U * pixels[source]) >> 8;
-#endif
-          image[y * 192 + x] = static_cast<int8_t>(gray - 128);
-        }
-      }
-#if defined(CONFIG_DUAL_ET_LIVE_VISION)
-      printk("dual-et: prepared MT9M114 frame for U55 YOLO\n");
-#else
-      printk("dual-et: prepared MLEK man_and_baby.bmp for U55 YOLO (192x192 gray)\n");
-#endif
-    } else if (workload == Workload::VisualWakeWord &&
-               info->scalar_type() == ScalarType::Char &&
-               elements == 128 * 128) {
-      int8_t* image = static_cast<int8_t*>(data);
-      for (size_t y = 0; y < 128; ++y) {
-#if defined(CONFIG_DUAL_ET_LIVE_VISION)
-        const size_t source_y = y * kLiveHeight / 128;
-#else
-        const size_t resized_y = y * 192 / 128;
-        const size_t source_y = 191 - resized_y;
-#endif
-        for (size_t x = 0; x < 128; ++x) {
-#if defined(CONFIG_DUAL_ET_LIVE_VISION)
-          const size_t source_x = x * kLiveWidth / 128;
-          uint8_t red, green, blue;
-          live_rgb(source_x, source_y, red, green, blue);
-          const unsigned gray =
-              (77U * red + 150U * green + 29U * blue) >> 8;
-#else
-          const size_t source_x = x * 192 / 128;
-          const size_t source = (source_y * 192 + source_x) * 3;
-          const unsigned gray =
-              (77U * pixels[source + 2] + 150U * pixels[source + 1] +
-               29U * pixels[source]) >> 8;
-#endif
-          int quantized = static_cast<int>(
-              roundf((gray / 255.0f) / 0.00813783f)) - 70;
-          quantized = quantized < -128 ? -128 :
-                      (quantized > 127 ? 127 : quantized);
-          image[y * 128 + x] = static_cast<int8_t>(quantized);
-        }
-      }
-#if defined(CONFIG_DUAL_ET_LIVE_VISION)
-      printk("dual-et: prepared MT9M114 frame for U85 VWW\n");
-#else
-      printk("dual-et: prepared shared face frame for U85 VWW\n");
-#endif
+      populate_model_input(image, info->nbytes(), workload);
+      printk("dual-et: prepared input for %s (%zux%zux%zu)\n",
+             workload == Workload::FaceDetection ? "U55 SSD" : "U85 MV2",
+             width, height, channels);
     } else {
       printk("dual-et: input size/type mismatch, elements=%zu bytes=%zu type=%u\n",
              elements, info->nbytes(),
@@ -612,48 +553,71 @@ struct Detection {
 
 float sigmoid(float value) { return 1.0f / (1.0f + expf(-value)); }
 
-void render_yolo_detections(Method& method, bool log_results) {
+void render_ssd_detections(Method& method, bool log_results) {
   std::vector<EValue> outputs(method.outputs_size());
   if (method.get_outputs(outputs.data(), outputs.size()) != Error::Ok ||
       outputs.size() != 2) {
-    printk("dual-et: U55 YOLO output retrieval failed\n");
+    printk("dual-et: U55 SSD output retrieval failed\n");
     return;
   }
+  Tensor boxes = outputs[0].toTensor();
+  Tensor logits = outputs[1].toTensor();
+  if (boxes.numel() == 1118U * 2U && logits.numel() == 1118U * 4U) {
+    Tensor swap = boxes;
+    boxes = logits;
+    logits = swap;
+  }
+  if (boxes.scalar_type() != ScalarType::Char ||
+      logits.scalar_type() != ScalarType::Char ||
+      boxes.numel() != 1118U * 4U || logits.numel() != 1118U * 2U) {
+    printk("dual-et: U55 SSD output contract mismatch boxes=%zu logits=%zu\n",
+           boxes.numel(), logits.numel());
+    return;
+  }
+  const int8_t* box_data = boxes.const_data_ptr<int8_t>();
+  const int8_t* score_data = logits.const_data_ptr<int8_t>();
+  sys_cache_data_invd_range(const_cast<int8_t*>(box_data), boxes.nbytes());
+  sys_cache_data_invd_range(const_cast<int8_t*>(score_data), logits.nbytes());
   Detection candidates[64];
   size_t count = 0;
-  const int anchors[2][6] = {{38, 77, 47, 97, 61, 126},
-                             {14, 26, 19, 37, 28, 55}};
-  const int resolution[2] = {6, 12};
-  const float scale[2] = {0.13408391f, 0.18535925f};
-  const int zero_point[2] = {47, 10};
-  for (size_t branch = 0; branch < 2; ++branch) {
-    if (!outputs[branch].isTensor()) continue;
-    Tensor tensor = outputs[branch].toTensor();
-    if (tensor.scalar_type() != ScalarType::Char) continue;
-    const int8_t* values = tensor.const_data_ptr<int8_t>();
-    /* Ethos-U writes these buffers without M55 cache snooping. */
-    sys_cache_data_invd_range(const_cast<int8_t*>(values), tensor.nbytes());
-    const int grid = resolution[branch];
-    for (int y = 0; y < grid; ++y) {
-      for (int x = 0; x < grid; ++x) {
-        for (int anchor = 0; anchor < 3; ++anchor) {
-          const size_t base = (y * grid + x) * 18 + anchor * 6;
-          auto dequant = [&](size_t field) {
-            return (static_cast<int>(values[base + field]) -
-                    zero_point[branch]) * scale[branch];
+  const int feature_h[4] = {15, 8, 4, 2};
+  const int feature_w[4] = {20, 10, 5, 3};
+  const int anchor_count[4] = {3, 2, 2, 3};
+  const float min_boxes[4][3] = {{10, 16, 24}, {32, 48, 0},
+                                 {64, 96, 0}, {128, 192, 256}};
+  size_t anchor_index = 0;
+  for (size_t level = 0; level < 4; ++level) {
+    for (int y = 0; y < feature_h[level]; ++y) {
+      for (int x = 0; x < feature_w[level]; ++x) {
+        for (int anchor = 0; anchor < anchor_count[level];
+             ++anchor, ++anchor_index) {
+          constexpr float kScoreScale = 0.026616256684064865f;
+          constexpr int kScoreZeroPoint = 1;
+          const float bg = (static_cast<int>(score_data[anchor_index * 2U]) -
+                            kScoreZeroPoint) * kScoreScale;
+          const float person =
+              (static_cast<int>(score_data[anchor_index * 2U + 1U]) -
+               kScoreZeroPoint) * kScoreScale;
+          const float score = sigmoid(person - bg);
+          if (score < 0.70f || count == ARRAY_SIZE(candidates)) continue;
+          auto delta = [&](size_t field) {
+            return (static_cast<int>(box_data[anchor_index * 4U + field]) - 71) *
+                   0.05725916847586632f;
           };
-          const float objectness = sigmoid(dequant(4));
-          const float score = objectness * sigmoid(dequant(5));
-          /* The 0.50 training/demo threshold is too permissive for the live
-           * MT9M114 feed and repeatedly classifies background edges as faces.
-           * Only publish boxes/status for a strong detection. */
-          if (score < 0.75f || count == 64) continue;
-          const float cx = (sigmoid(dequant(0)) + x) / grid * 192.0f;
-          const float cy = (sigmoid(dequant(1)) + y) / grid * 192.0f;
-          const float width = expf(dequant(2)) * anchors[branch][anchor * 2];
-          const float height = expf(dequant(3)) * anchors[branch][anchor * 2 + 1];
-          candidates[count++] = {cx - width / 2, cy - height / 2,
-                                 cx + width / 2, cy + height / 2, score};
+          const float aw = min_boxes[level][anchor] / 160.0f;
+          const float ah = min_boxes[level][anchor] / 120.0f;
+          const float anchor_cx =
+              (static_cast<float>(x) + 0.5f) / feature_w[level];
+          const float anchor_cy =
+              (static_cast<float>(y) + 0.5f) / feature_h[level];
+          const float cx = anchor_cx + delta(0) * 0.1f * aw;
+          const float cy = anchor_cy + delta(1) * 0.1f * ah;
+          const float width = expf(delta(2) * 0.2f) * aw;
+          const float height = expf(delta(3) * 0.2f) * ah;
+          candidates[count++] = {(cx - width / 2.0f) * 192.0f,
+                                 (cy - height / 2.0f) * 192.0f,
+                                 (cx + width / 2.0f) * 192.0f,
+                                 (cy + height / 2.0f) * 192.0f, score};
         }
       }
     }
@@ -680,7 +644,9 @@ void render_yolo_detections(Method& method, bool log_results) {
                            (candidates[i].y1 - candidates[i].y0);
       const float area_b = (selected[j].x1 - selected[j].x0) *
                            (selected[j].y1 - selected[j].y0);
-      if (intersection / (area_a + area_b - intersection) > 0.45f) {
+      const float iou = intersection / (area_a + area_b - intersection);
+      const float overlap_min = intersection / fminf(area_a, area_b);
+      if (iou > 0.30f || overlap_min > 0.60f) {
         suppressed = true;
         break;
       }
@@ -688,9 +654,9 @@ void render_yolo_detections(Method& method, bool log_results) {
     if (!suppressed) selected[selected_count++] = candidates[i];
   }
   if (log_results)
-    printk("dual-et: YOLO faces=%zu candidates=%zu\n", selected_count, count);
+    printk("dual-et: SSD persons=%zu candidates=%zu\n", selected_count, count);
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
-  zephyr_dual_show_yolo_result(static_cast<int>(selected_count));
+  zephyr_dual_show_ssd_result(static_cast<int>(selected_count));
 #endif
   for (size_t i = 0; i < selected_count; ++i) {
     if (log_results)
@@ -731,17 +697,64 @@ void render_yolo_detections(Method& method, bool log_results) {
 #endif
 }
 
+void lookup_class_label(size_t class_id, char* label, size_t capacity) {
+  const char* text = reinterpret_cast<const char*>(kClassLabelsAddress);
+  size_t current = 0;
+  while (current < class_id &&
+         static_cast<size_t>(text - reinterpret_cast<const char*>(kClassLabelsAddress)) <
+             kClassLabelsSize) {
+    if (*text++ == '\n') ++current;
+  }
+  size_t used = 0;
+  while (used + 1U < capacity && *text != '\n' && *text != ',' && *text != '\0') {
+    const char c = *text++;
+    label[used++] = c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c;
+  }
+  label[used] = '\0';
+}
+
+void render_classification(Method& method, size_t iteration) {
+  std::vector<EValue> outputs(method.outputs_size());
+  if (method.get_outputs(outputs.data(), outputs.size()) != Error::Ok ||
+      outputs.size() != 1 || !outputs[0].isTensor()) return;
+  Tensor output = outputs[0].toTensor();
+  if (output.scalar_type() != ScalarType::Char || output.numel() != 1000U) return;
+  const int8_t* values = output.const_data_ptr<int8_t>();
+  sys_cache_data_invd_range(const_cast<int8_t*>(values), output.nbytes());
+  size_t best = 0;
+  float denominator = 0.0f;
+  for (size_t i = 1; i < 1000U; ++i)
+    if (values[i] > values[best]) best = i;
+  for (size_t i = 0; i < 1000U; ++i)
+    denominator += expf((static_cast<int>(values[i]) - values[best]) *
+                        0.019969256594777107f);
+  const int confidence = static_cast<int>(100.0f / denominator + 0.5f);
+  lookup_class_label(best, latest_class_label, sizeof(latest_class_label));
+  latest_class_id = static_cast<int>(best);
+  latest_class_confidence = confidence;
+  if (iteration < 12U || (iteration % 30U) == 0U)
+    printk("dual-et: frame=%zu CLASS=%zu %s confidence=%d%% raw=%d\n",
+           iteration, best, latest_class_label, confidence, values[best]);
+#if defined(CONFIG_DUAL_ET_LIVE_VISION)
+  zephyr_dual_show_classification(static_cast<int>(best), confidence,
+                                  latest_class_label);
+#endif
+}
+
 int run_model(const char* name, const unsigned char* pte, size_t pte_size,
               unsigned char* method_pool, size_t method_pool_size,
               unsigned char* temp_pool, size_t temp_pool_size,
               Workload workload, size_t worker_id) {
   struct k_sem* execute_go = worker_id == 0 ? &u55_execute_go_sem
                                              : &u85_execute_go_sem;
+  struct k_sem* npu_launch = worker_id == 0 ? &u55_npu_launch_sem
+                                             : &u85_npu_launch_sem;
   prepare_start_cycles[worker_id] = k_cycle_get_64();
-  auto setup_failure = [execute_go](int result) {
+  auto setup_failure = [execute_go, worker_id](int result) {
     /* Always satisfy the coordinator barrier. The healthy worker may still
      * execute, and both threads will terminate instead of deadlocking.
      */
+    prepare_ready_cycles[worker_id] = k_cycle_get_64();
     for (;;) {
       k_sem_give(&execute_ready_sem);
       k_sem_take(execute_go, K_FOREVER);
@@ -860,7 +873,12 @@ int run_model(const char* name, const unsigned char* pte, size_t pte_size,
     }
     /* Both model tensors now own a copy of the camera pixels, so the
      * coordinator may immediately return the capture buffer to CPI. */
-    if (!use_test_image) k_sem_give(&input_copied_sem);
+    if (!use_test_image) {
+      k_sem_give(&input_copied_sem);
+      /* Do not let whichever worker finishes preprocessing first submit and
+       * finish its NPU job before the other input is ready. */
+      k_sem_take(npu_launch, K_FOREVER);
+    }
 #endif
     uint64_t start = k_cycle_get_64();
     execute_start_cycles[worker_id] = start;
@@ -872,37 +890,11 @@ int run_model(const char* name, const unsigned char* pte, size_t pte_size,
       aggregate_status = status;
     }
 
-    if (status == Error::Ok &&
-        workload == Workload::VisualWakeWord) {
-    std::vector<EValue> outputs(method->outputs_size());
-    if (method->get_outputs(outputs.data(), outputs.size()) == Error::Ok &&
-        !outputs.empty() && outputs[0].isTensor()) {
-      Tensor output = outputs[0].toTensor();
-      if (output.scalar_type() == ScalarType::Char && output.numel() == 2) {
-        const int8_t* scores = output.const_data_ptr<int8_t>();
-        sys_cache_data_invd_range(const_cast<int8_t*>(scores),
-                                  output.nbytes());
-        /* Require a useful logit margin instead of a bare argmax.  A nearly
-         * tied output is "no person", which prevents a sticky-looking P on
-         * ordinary background frames. */
-        constexpr int kVwwPersonMargin = 48;
-        /* The exported VWW model orders logits as NO_PERSON, PERSON. */
-        const bool person =
-            static_cast<int>(scores[1]) >=
-            static_cast<int>(scores[0]) + kVwwPersonMargin;
-        latest_vww_person = person;
-#if defined(CONFIG_DUAL_ET_LIVE_VISION)
-        zephyr_dual_show_vww_result(person ? 1 : 0);
-#endif
-        if (iteration < 12U || (iteration % 30U) == 0U)
-          printk("dual-et: frame=%zu VWW=%s scores=%d/%d\n", iteration,
-                 person ? "PERSON" : "NO_PERSON", scores[0], scores[1]);
-      }
-    }
-    }
+    if (status == Error::Ok && workload == Workload::ImageClassification)
+      render_classification(*method, iteration);
     if (status == Error::Ok &&
         workload == Workload::FaceDetection) {
-      render_yolo_detections(*method, (iteration % 30U) == 0U);
+      render_ssd_detections(*method, iteration < 2U || (iteration % 30U) == 0U);
     }
     k_sem_give(&done_sem);
   }
@@ -911,7 +903,7 @@ int run_model(const char* name, const unsigned char* pte, size_t pte_size,
 
 void u55_thread_entry(void*, void*, void*) {
   k_sem_take(&u55_start_sem, K_FOREVER);
-  (void)run_model("U55-YOLO", model_u55_pte, kU55PteSize,
+  (void)run_model("U55-SSD", model_u55_pte, kU55PteSize,
                   u55_method_pool, sizeof(u55_method_pool),
                   u55_temp_pool, sizeof(u55_temp_pool),
                   Workload::FaceDetection, 0);
@@ -919,16 +911,16 @@ void u55_thread_entry(void*, void*, void*) {
 
 void u85_thread_entry(void*, void*, void*) {
   k_sem_take(&u85_start_sem, K_FOREVER);
-  (void)run_model("U85-VWW", model_u85_pte, kU85PteSize,
+  (void)run_model("U85-MV2", model_u85_pte, kU85PteSize,
                   u85_method_pool, sizeof(u85_method_pool),
                   u85_temp_pool, sizeof(u85_temp_pool),
-                  Workload::VisualWakeWord, 1);
+                  Workload::ImageClassification, 1);
 }
 
 }  // namespace
 
 int main(void) {
-  printk("*** dual ExecuTorch parallel YOLO(U55) + VWW(U85) ***\n");
+  printk("*** dual ExecuTorch parallel SSD(U55) + MobileNetV2(U85) ***\n");
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
 #if defined(CONFIG_DUAL_ET_LEGACY_NATIVE_VISION)
   printk("dual-et: RUN profile rc=%d memory=%08x->%08x\n",
@@ -947,13 +939,15 @@ int main(void) {
   constexpr uint32_t kPteMagic = 0x32315445U;
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
   const volatile uint32_t* stored_u85 =
-      reinterpret_cast<const volatile uint32_t*>(kPayloadStoreAddress);
+      reinterpret_cast<const volatile uint32_t*>(kU85PteAddress);
   const volatile uint32_t* stored_u55 =
       reinterpret_cast<const volatile uint32_t*>(kU55PteAddress);
   const volatile uint16_t* stored_bmp =
       reinterpret_cast<const volatile uint16_t*>(kFaceBmpAddress);
-  sys_cache_data_invd_range(reinterpret_cast<void*>(kPayloadStoreAddress),
-                            kPayloadSize);
+  sys_cache_data_invd_range(reinterpret_cast<void*>(kU85PteAddress),
+                            kU85PteSize);
+  sys_cache_data_invd_range(reinterpret_cast<void*>(kU85PteAddress),
+                            kModelPayloadSize);
   if (stored_u85[0] != kPteOffset || stored_u85[1] != kPteMagic ||
       stored_u55[0] != kPteOffset || stored_u55[1] != kPteMagic ||
       stored_bmp[0] != 0x4d42U) {
@@ -969,7 +963,7 @@ int main(void) {
 #endif
   const volatile uint32_t* u85_header =
       reinterpret_cast<const volatile uint32_t*>(kU85PteAddress);
-  printk("dual-et: U85 VWW DTCM stage reserved=%p/%zu\n",
+  printk("dual-et: U85 MobileNetV2 PTE=%p/%zu\n",
          model_u85_pte, kU85PteSize);
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
   printk("dual-et: U55 PTE=%p size=%zu live MT9M114 input enabled\n",
@@ -1005,7 +999,7 @@ int main(void) {
                   nullptr, nullptr, nullptr, 5, 0, K_NO_WAIT);
   k_thread_create(&u85_thread, u85_thread_stack,
                   K_THREAD_STACK_SIZEOF(u85_thread_stack), u85_thread_entry,
-                  nullptr, nullptr, nullptr, 4, 0, K_NO_WAIT);
+                  nullptr, nullptr, nullptr, 5, 0, K_NO_WAIT);
   /* ExecuTorch program/method construction uses shared runtime machinery.
    * Prepare each method serially, then execute only the immutable prepared
    * methods in parallel on their independent NPU backends.
@@ -1013,7 +1007,7 @@ int main(void) {
   k_sem_give(&u55_start_sem);
   k_sem_take(&execute_ready_sem, K_FOREVER);
 #if defined(CONFIG_DUAL_ET_LIVE_VISION)
-  printk("dual-et: U85 VWW remains in MRAM %p (%zu bytes)\n",
+  printk("dual-et: U85 MobileNetV2 remains in MRAM %p (%zu bytes)\n",
          model_u85_pte, kU85PteSize);
 #endif
   k_sem_give(&u85_start_sem);
@@ -1060,11 +1054,11 @@ int main(void) {
   zephyr_dual_reset_results();
 #endif
   printk("dual-et: live dual-NPU pipeline started\n");
-  uint64_t person_u55_total_us = 0;
-  uint64_t person_u85_total_us = 0;
-  uint64_t person_span_total_us = 0;
-  uint64_t person_overlap_total_us = 0;
-  uint32_t person_samples = 0;
+  uint64_t u55_total_us = 0;
+  uint64_t u85_total_us = 0;
+  uint64_t span_total_us = 0;
+  uint64_t overlap_total_us = 0;
+  uint32_t inference_samples = 0;
   constexpr size_t kRollingWindow = 16U;
   uint32_t rolling_u55[kRollingWindow] = {};
   uint32_t rolling_u85[kRollingWindow] = {};
@@ -1081,8 +1075,7 @@ int main(void) {
       continue;
     }
     /* Keep the most recently completed result visible while this frame is
-     * processed. Each worker replaces its tile only after it has a new result,
-     * avoiding a distracting N/P/F flash between capture and inference. */
+     * processed. Each worker replaces its result only after inference. */
     k_sem_give(&u85_execute_go_sem);
     k_sem_give(&u55_execute_go_sem);
     k_sem_take(&input_copied_sem, K_FOREVER);
@@ -1090,6 +1083,10 @@ int main(void) {
     const int release_rc = zephyr_dual_release_frame();
     if (release_rc != 0)
       printk("dual-et: frame=%zu release failed rc=%d\n", frame, release_rc);
+    /* Both bound tensors are now stable. Start both delegates as one launch
+     * phase; their NPU execution intervals are measured below. */
+    k_sem_give(&u55_npu_launch_sem);
+    k_sem_give(&u85_npu_launch_sem);
     k_sem_take(&done_sem, K_FOREVER);
     k_sem_take(&done_sem, K_FOREVER);
     if (execute_status[0] != 0 || execute_status[1] != 0) {
@@ -1119,11 +1116,11 @@ int main(void) {
       const uint64_t span_us = k_cyc_to_us_floor64(last_end - first_start);
       const uint64_t overlap_us = overlap_end > overlap_start
           ? k_cyc_to_us_floor64(overlap_end - overlap_start) : 0U;
-      ++person_samples;
-      person_u55_total_us += u55_us;
-      person_u85_total_us += u85_us;
-      person_span_total_us += span_us;
-      person_overlap_total_us += overlap_us;
+      ++inference_samples;
+      u55_total_us += u55_us;
+      u85_total_us += u85_us;
+      span_total_us += span_us;
+      overlap_total_us += overlap_us;
 
       if (rolling_count == kRollingWindow) {
         rolling_u55_sum -= rolling_u55[rolling_index];
@@ -1149,17 +1146,17 @@ int main(void) {
           static_cast<uint32_t>(rolling_span_sum / rolling_count),
           static_cast<uint32_t>(rolling_overlap_sum / rolling_count));
       if (frame == 1U || (frame % 10U) == 0U) {
-        printk("dual-et: PAR %s frame=%zu sample=%u "
+        printk("dual-et: PAR class=%d/%s frame=%zu sample=%u "
                "U55=%llu U85=%llu span=%llu overlap=%llu us "
                "avg U55/U85/span/overlap=%llu/%llu/%llu/%llu us\n",
-               latest_vww_person ? "PERSON" : "NO_PERSON", frame,
-               person_samples,
+               latest_class_id, latest_class_label, frame,
+               inference_samples,
                (unsigned long long)u55_us, (unsigned long long)u85_us,
                (unsigned long long)span_us, (unsigned long long)overlap_us,
-               (unsigned long long)(person_u55_total_us / person_samples),
-               (unsigned long long)(person_u85_total_us / person_samples),
-               (unsigned long long)(person_span_total_us / person_samples),
-               (unsigned long long)(person_overlap_total_us / person_samples));
+               (unsigned long long)(u55_total_us / inference_samples),
+               (unsigned long long)(u85_total_us / inference_samples),
+               (unsigned long long)(span_total_us / inference_samples),
+               (unsigned long long)(overlap_total_us / inference_samples));
       }
     }
     if ((frame % 30U) == 0U)

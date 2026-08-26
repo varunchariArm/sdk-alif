@@ -9,14 +9,22 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(tflm_dual_npu C CXX)
 
 set(MODEL_DIR "${CMAKE_CURRENT_LIST_DIR}/models")
-set(U85_MODEL "${MODEL_DIR}/vww_u85_256.tflite")
-set(U55_MODEL "${MODEL_DIR}/yolo_fastest_face_u55_256.tflite")
-set(FACE_BMP "${MODEL_DIR}/man_and_baby.bmp")
+set(U85_MODEL "${MODEL_DIR}/mobilenet_v2_imagenet_u85_256.tflite")
+set(U55_MODEL "${MODEL_DIR}/comparable_ssd_slim_u55_256.tflite")
+set(FACE_BMP "${MODEL_DIR}/grace_hopper.bmp")
+set(CLASS_LABELS "${MODEL_DIR}/labels_imagenet_1000.txt")
 set(SRAM0_PAYLOAD "${CMAKE_CURRENT_BINARY_DIR}/u85_model.bin")
+
+# Model sizes define the packed payload offsets compiled into model_layout.h.
+# Re-run CMake whenever an artifact is replaced so an incremental build cannot
+# combine a new payload with stale firmware addresses.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${U85_MODEL}" "${U55_MODEL}" "${FACE_BMP}" "${CLASS_LABELS}")
 
 file(SIZE "${U85_MODEL}" U85_MODEL_SIZE)
 file(SIZE "${U55_MODEL}" U55_MODEL_SIZE)
 file(SIZE "${FACE_BMP}" FACE_BMP_SIZE)
+file(SIZE "${CLASS_LABELS}" CLASS_LABELS_SIZE)
 configure_file(src/model_layout.h.in
                "${CMAKE_CURRENT_BINARY_DIR}/model_layout.h" @ONLY)
 
@@ -25,7 +33,8 @@ add_custom_command(
   COMMAND "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_LIST_DIR}/tools/pack_sram0_payload.py"
           --output "${SRAM0_PAYLOAD}" "${U85_MODEL}" "${U55_MODEL}" "${FACE_BMP}"
-  DEPENDS "${U85_MODEL}" "${U55_MODEL}" "${FACE_BMP}"
+          "${CLASS_LABELS}"
+  DEPENDS "${U85_MODEL}" "${U55_MODEL}" "${FACE_BMP}" "${CLASS_LABELS}"
           "${CMAKE_CURRENT_LIST_DIR}/tools/pack_sram0_payload.py"
   VERBATIM)
 add_custom_target(gen_sram0_payload ALL DEPENDS "${SRAM0_PAYLOAD}")

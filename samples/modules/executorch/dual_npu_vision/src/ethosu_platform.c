@@ -76,10 +76,12 @@ int arm_ethos_prepare_invoke_buffers(uint32_t product,
 	uintptr_t cmd = (uintptr_t)*cmd_data;
 	uintptr_t weights = (uintptr_t)*weight_data;
 	bool cmd_visible = (cmd >= DTCM_BASE && cmd < DTCM_BASE + DTCM_SIZE) ||
-			   (cmd >= 0x02000000U && cmd < 0x02800000U);
+			   (cmd >= 0x02000000U && cmd < 0x02800000U) ||
+			   (cmd >= 0x80000000U && cmd < 0x80600000U);
 	bool weights_visible =
 		(weights >= DTCM_BASE && weights < DTCM_BASE + DTCM_SIZE) ||
-		(weights >= 0x02000000U && weights < 0x02800000U);
+		(weights >= 0x02000000U && weights < 0x02800000U) ||
+		(weights >= 0x80000000U && weights < 0x80600000U);
 	static unsigned invoke_count;
 	if (invoke_count++ == 0U || (invoke_count % 30U) == 0U) {
 		printk("dual-et: U85 invoke buffers cmd=%p/%zu weights=%p/%zu visible=%d/%d\n",
