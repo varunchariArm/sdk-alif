@@ -6,6 +6,7 @@
 #include <cmsis_core.h>
 #include <ethosu_device.h>
 #include <ethosu_driver.h>
+#include <pmu_ethosu.h>
 #include <soc_memory_map.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/cache.h>
@@ -28,6 +29,8 @@ static volatile uint64_t u55_submit_cycle;
 static volatile uint64_t u85_submit_cycle;
 static volatile uint64_t u55_irq_cycle;
 static volatile uint64_t u85_irq_cycle;
+static volatile uint64_t u55_pmu_cycles;
+static volatile uint64_t u85_pmu_cycles;
 
 #define U85_CMD_MIRROR_SIZE (32 * 1024)
 #define U85_WEIGHT_MIRROR_SIZE (512 * 1024)
@@ -235,6 +238,29 @@ void ethosu_inference_begin(struct ethosu_driver *drv, void *user_arg)
 	} else if (drv == &u85_driver) {
 		u85_submit_cycle = k_cycle_get_64();
 	}
+
+	/* Count only cycles for which the NPU reports ACTIVE. This excludes the
+	 * ExecuTorch method dispatch, tensor copies and CPU quantization work from
+	 * the accelerator metric while the existing k_cycle timing retains the
+	 * complete method->execute() latency. */
+	ETHOSU_PMU_Enable(drv);
+	ETHOSU_PMU_PMCCNTR_CFG_Set_Start_Event(drv, ETHOSU_PMU_NPU_ACTIVE);
+	ETHOSU_PMU_PMCCNTR_CFG_Set_Stop_Event(drv, ETHOSU_PMU_NPU_IDLE);
+	ETHOSU_PMU_CNTR_Enable(drv, ETHOSU_PMU_CCNT_Msk);
+	ETHOSU_PMU_CYCCNT_Reset(drv);
+}
+
+void ethosu_inference_end(struct ethosu_driver *drv, void *user_arg)
+{
+	ARG_UNUSED(user_arg);
+	uint64_t cycles = ETHOSU_PMU_Get_CCNTR(drv);
+	ETHOSU_PMU_CNTR_Disable(drv, ETHOSU_PMU_CCNT_Msk);
+	ETHOSU_PMU_Disable(drv);
+	if (drv == &u55_driver) {
+		u55_pmu_cycles = cycles;
+	} else if (drv == &u85_driver) {
+		u85_pmu_cycles = cycles;
+	}
 }
 
 int dual_ethosu_init(void)
@@ -274,3 +300,5 @@ uint64_t dual_ethosu_u55_submit_cycle(void) { return u55_submit_cycle; }
 uint64_t dual_ethosu_u85_submit_cycle(void) { return u85_submit_cycle; }
 uint64_t dual_ethosu_u55_irq_cycle(void) { return u55_irq_cycle; }
 uint64_t dual_ethosu_u85_irq_cycle(void) { return u85_irq_cycle; }
+uint64_t dual_ethosu_u55_pmu_cycles(void) { return u55_pmu_cycles; }
+uint64_t dual_ethosu_u85_pmu_cycles(void) { return u85_pmu_cycles; }

@@ -54,6 +54,8 @@ extern "C" uint64_t dual_ethosu_u55_submit_cycle(void);
 extern "C" uint64_t dual_ethosu_u85_submit_cycle(void);
 extern "C" uint64_t dual_ethosu_u55_irq_cycle(void);
 extern "C" uint64_t dual_ethosu_u85_irq_cycle(void);
+extern "C" uint64_t dual_ethosu_u55_pmu_cycles(void);
+extern "C" uint64_t dual_ethosu_u85_pmu_cycles(void);
 extern "C" void dual_report_checkpoint(unsigned) {}
 
 extern "C" {
@@ -1148,11 +1150,14 @@ int main(void) {
       if (frame == 1U || (frame % 10U) == 0U) {
         printk("dual-et: PAR class=%d/%s frame=%zu sample=%u "
                "U55=%llu U85=%llu span=%llu overlap=%llu us "
+               "NPU-active U55/U85=%llu/%llu cycles "
                "avg U55/U85/span/overlap=%llu/%llu/%llu/%llu us\n",
                latest_class_id, latest_class_label, frame,
                inference_samples,
                (unsigned long long)u55_us, (unsigned long long)u85_us,
                (unsigned long long)span_us, (unsigned long long)overlap_us,
+               (unsigned long long)dual_ethosu_u55_pmu_cycles(),
+               (unsigned long long)dual_ethosu_u85_pmu_cycles(),
                (unsigned long long)(u55_total_us / inference_samples),
                (unsigned long long)(u85_total_us / inference_samples),
                (unsigned long long)(span_total_us / inference_samples),

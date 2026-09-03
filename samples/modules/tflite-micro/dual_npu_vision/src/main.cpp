@@ -17,6 +17,8 @@
 extern "C" int dual_ethosu_init(void);
 extern "C" unsigned dual_ethosu_u55_irqs(void);
 extern "C" unsigned dual_ethosu_u85_irqs(void);
+extern "C" uint64_t dual_ethosu_u55_pmu_cycles(void);
+extern "C" uint64_t dual_ethosu_u85_pmu_cycles(void);
 extern "C" int zephyr_dual_display_init(void);
 extern "C" int zephyr_dual_capture_preview(void);
 extern "C" int zephyr_dual_release_frame(void);
@@ -459,10 +461,13 @@ int main(void) {
         static_cast<uint32_t>(su55 / count), static_cast<uint32_t>(su85 / count),
         static_cast<uint32_t>(sspan / count), static_cast<uint32_t>(soverlap / count));
     if (frame == 1U || frame % 10U == 0U)
-      printk("dual-tflm: PAR class=%d/%s frame=%zu U55=%llu U85=%llu span=%llu overlap=%llu us\n",
+      printk("dual-tflm: PAR class=%d/%s frame=%zu U55=%llu U85=%llu "
+             "span=%llu overlap=%llu us NPU-active U55/U85=%llu/%llu cycles\n",
              latest_class_id, latest_class_label, frame,
              (unsigned long long)u55_us, (unsigned long long)u85_us,
-             (unsigned long long)span_us, (unsigned long long)overlap_us);
+             (unsigned long long)span_us, (unsigned long long)overlap_us,
+             (unsigned long long)dual_ethosu_u55_pmu_cycles(),
+             (unsigned long long)dual_ethosu_u85_pmu_cycles());
     if (frame % 30U == 0U)
       printk("dual-tflm: live frame=%zu IRQs=%u/%u\n", frame,
              dual_ethosu_u55_irqs(), dual_ethosu_u85_irqs());

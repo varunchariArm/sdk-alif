@@ -30,15 +30,20 @@ except (ImportError, OSError, StopIteration):
 from torchvision.models import MobileNet_V2_Weights, mobilenet_v2  # noqa: E402
 from torchvision.models.detection import ssdlite320_mobilenet_v3_large  # noqa: E402
 
-from executorch.backends.arm.ethosu.backend import EthosUBackend  # noqa: E402
 from executorch.backends.arm.ethosu import EthosUCompileSpec, EthosUPartitioner  # noqa: E402
 from executorch.backends.arm.quantizer import (  # noqa: E402
     EthosUQuantizer,
     get_symmetric_quantization_config,
 )
-from executorch.exir import EdgeCompileConfig, to_edge, to_edge_transform_and_lower  # noqa: E402
-from executorch.exir.backend.backend_api import to_backend  # noqa: E402
-from executorch.exir.backend.backend_details import PreprocessResult  # noqa: E402
+from executorch.exir import (  # noqa: E402
+    EdgeCompileConfig,
+    ExecutorchBackendConfig,
+    to_edge_transform_and_lower,
+)
+from executorch.exir.passes.quantize_io_pass import (  # noqa: E402
+    QuantizeInputs,
+    QuantizeOutputs,
+)
 from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e  # noqa: E402
 
 from comparable_models import ComparableSsdSlim  # noqa: E402
@@ -58,22 +63,6 @@ class SsdHeads(nn.Module):
         return outputs["bbox_regression"], outputs["cls_logits"]
 
 
-class DirectSsdInterface(nn.Module):
-    def forward(self, image: torch.Tensor):
-        flat = image.reshape(-1)
-        boxes = flat[: 3234 * 4].reshape(1, 3234, 4)
-        logits = flat[: 3234 * 2].reshape(1, 3234, 2)
-        return boxes, logits
-
-
-class DirectComparableSsdInterface(nn.Module):
-    def forward(self, image: torch.Tensor):
-        flat = image.reshape(-1)
-        boxes = flat[: 1118 * 4].reshape(1, 1118, 4)
-        logits = flat[: 1118 * 2].reshape(1, 1118, 2)
-        return boxes, logits
-
-
 class ComparableSsdCameraInput(nn.Module):
     """Expose the same normalized camera boundary as the TFLite artifact."""
 
@@ -83,15 +72,6 @@ class ComparableSsdCameraInput(nn.Module):
 
     def forward(self, image: torch.Tensor):
         return self.model(image * 255.0 - 128.0)
-
-
-class DirectMv2Interface(nn.Module):
-    def __init__(self, classes: int):
-        super().__init__()
-        self.classes = classes
-
-    def forward(self, image: torch.Tensor):
-        return image.reshape(-1)[: self.classes].reshape(1, self.classes)
 
 
 class NormalizedClassifier(nn.Module):
@@ -195,13 +175,13 @@ def main() -> None:
         shape = (1, 3, 320, 320)
         target = "ethos-u55-256"
         system_config = "RTSS_HP_SRAM_MRAM"
-        interface = DirectSsdInterface().eval()
+        output_count = 2
     elif args.model == "comparable-ssd":
         model = make_comparable_ssd(args.weights)
         shape = ComparableSsdSlim.input_shape
         target = "ethos-u55-256"
         system_config = "RTSS_HP_SRAM_MRAM"
-        interface = DirectComparableSsdInterface().eval()
+        output_count = 2
     else:
         classes = selected_imagenet_classes(args.mv2_classes)
         if len(classes) != args.mv2_classes:
@@ -210,7 +190,7 @@ def main() -> None:
         shape = (1, 3, 224, 224)
         target = "ethos-u85-256"
         system_config = "Ethos_U85_SRAM_MRAM"
-        interface = DirectMv2Interface(len(classes)).eval()
+        output_count = 1
         if args.labels_output:
             categories = MobileNet_V2_Weights.DEFAULT.meta["categories"]
             args.labels_output.parent.mkdir(parents=True, exist_ok=True)
@@ -241,23 +221,11 @@ def main() -> None:
             print(f"qparam {node.name}: scale={node.args[1]} zero_point={node.args[2]}")
     quantized_program = torch.export.export(quantized, (example,), strict=True)
 
-    streams: list[bytes] = []
-    original_preprocess = EthosUBackend.preprocess
-
-    def capture(program, specs):
-        result = original_preprocess(program, specs)
-        streams.append(result.processed_bytes)
-        return result
-
-    EthosUBackend.preprocess = staticmethod(capture)
-    try:
-        edge = to_edge_transform_and_lower(
-            programs=quantized_program,
-            partitioner=[EthosUPartitioner(compile_spec)],
-            compile_config=EdgeCompileConfig(_check_ir_validity=False),
-        )
-    finally:
-        EthosUBackend.preprocess = original_preprocess
+    edge = to_edge_transform_and_lower(
+        programs=quantized_program,
+        partitioner=[EthosUPartitioner(compile_spec)],
+        compile_config=EdgeCompileConfig(_check_ir_validity=False),
+    )
 
     graph = edge.exported_program().graph_module.graph
     delegates = sum(
@@ -272,24 +240,46 @@ def main() -> None:
         and "quantized_decomposed" not in str(node.target)
         and "getitem" not in str(node.target)
     ]
-    if delegates != 1 or fallbacks or len(streams) != 1:
+    if delegates != 1 or fallbacks:
         raise RuntimeError(
-            f"not fully delegated: delegates={delegates} fallbacks={fallbacks} streams={len(streams)}"
+            f"not fully delegated: delegates={delegates} fallbacks={fallbacks}"
         )
 
-    direct_example = (torch.zeros(shape, dtype=torch.int8),)
-    direct_edge = to_edge(torch.export.export(interface, direct_example, strict=True))
-    EthosUBackend.preprocess = staticmethod(
-        lambda _program, _specs: PreprocessResult(processed_bytes=streams[0])
+    # Strip the graph-boundary quantize/dequantize operations after lowering.
+    # The resulting forward method accepts and returns int8 tensors directly,
+    # matching TFLM and avoiding image-sized FP32 conversion on the Cortex-M55.
+    edge = edge.transform(
+        passes=[
+            QuantizeInputs(edge, [0], method_name="forward"),
+            QuantizeOutputs(
+                edge, list(range(output_count)), method_name="forward"
+            ),
+        ]
     )
-    try:
-        direct = to_backend("EthosUBackend", direct_edge.exported_program(), [])
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_bytes(direct.buffer())
-    finally:
-        EthosUBackend.preprocess = original_preprocess
+
+    exported_edge = edge.exported_program()
+    placeholders = [
+        node for node in exported_edge.graph_module.graph.nodes if node.op == "placeholder"
+    ]
+    outputs = list(exported_edge.graph_module.graph.output_node().args[0])
+    if len(placeholders) != 1 or placeholders[0].meta["val"].dtype != torch.int8:
+        raise RuntimeError("QuantizeInputs did not produce an int8 input boundary")
+    if len(outputs) != output_count or any(
+        output.meta["val"].dtype != torch.int8 for output in outputs
+    ):
+        raise RuntimeError("QuantizeOutputs did not produce int8 output boundaries")
+
+    executorch_program = edge.to_executorch(
+        config=ExecutorchBackendConfig(extract_delegate_segments=False)
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_bytes(executorch_program.buffer)
 
     print(f"model={args.model} target={target} fully_delegated=yes")
+    print(
+        f"runtime_boundary=input:int8 outputs:{','.join(['int8'] * output_count)} "
+        f"quant_config_methods={len(edge._config_methods or {})}"
+    )
     print(f"PTE: {args.output} ({args.output.stat().st_size} bytes)")
 
 

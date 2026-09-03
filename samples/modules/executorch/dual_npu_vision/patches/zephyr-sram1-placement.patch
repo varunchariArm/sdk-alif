@@ -1,0 +1,43 @@
+diff --git a/drivers/display/Kconfig.cdc200 b/drivers/display/Kconfig.cdc200
+index 5dcea9dfc86..74bfd9198b8 100644
+--- a/drivers/display/Kconfig.cdc200
++++ b/drivers/display/Kconfig.cdc200
+@@ -14,0 +15,5 @@ config FB_USES_DTCM_REGION
++
++config CDC200_FB_USES_SRAM1
++	bool "Place CDC200 framebuffers in SRAM1"
++	help
++	  Allocate CDC200 framebuffers in Alif shared SRAM1 instead of SRAM0.
+diff --git a/drivers/display/display_cdc200.c b/drivers/display/display_cdc200.c
+index 65e1cc77ec9..f17d7055def 100644
+--- a/drivers/display/display_cdc200.c
++++ b/drivers/display/display_cdc200.c
+@@ -931,0 +932,3 @@ static DEVICE_API(display, cdc200_display_api) = {
++#else
++#if defined(CONFIG_CDC200_FB_USES_SRAM1)
++#define FRAME_BUFFER_SECTION __alif_sram1_section
+@@ -933,0 +937 @@ static DEVICE_API(display, cdc200_display_api) = {
++#endif
+diff --git a/soc/alif/ensemble/Kconfig.soc b/soc/alif/ensemble/Kconfig.soc
+index c3f5efb3252..38942fd0b44 100644
+--- a/soc/alif/ensemble/Kconfig.soc
++++ b/soc/alif/ensemble/Kconfig.soc
+@@ -35,0 +36,6 @@ endchoice
++config VIDEO_BUFFER_POOL_SRAM1
++	bool "Move video buffer pool to SRAM1"
++	depends on VIDEO
++	help
++	  Place the video DMA buffer heap in shared SRAM1 instead of SRAM0.
++
+diff --git a/soc/alif/ensemble/common/sram.ld b/soc/alif/ensemble/common/sram.ld
+index 4d111d42e90..19bd65f9e64 100644
+--- a/soc/alif/ensemble/common/sram.ld
++++ b/soc/alif/ensemble/common/sram.ld
+@@ -12,0 +13 @@ KEEP(*(".alif_sram0.*"))
++#if !defined(CONFIG_VIDEO_BUFFER_POOL_SRAM1)
+@@ -13,0 +15 @@ KEEP(*(.noinit.*kheap_buf_video_buffer_pool))
++#endif
+@@ -28,0 +31,3 @@ KEEP(*(".alif_sram1.*"))
++#if defined(CONFIG_VIDEO_BUFFER_POOL_SRAM1)
++KEEP(*(.noinit.*kheap_buf_video_buffer_pool))
++#endif

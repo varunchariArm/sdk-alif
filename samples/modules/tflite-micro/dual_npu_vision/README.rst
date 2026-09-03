@@ -143,9 +143,15 @@ same SDK, overlays, core-driver revision, compiler, and optimization level.
 Compare:
 
 * U55, U85, span, and overlap timings printed by each application
+* ``NPU-active U55/U85`` PMU cycles printed by each application
 * ``zephyr.bin`` and ``zephyr.elf`` sizes
 * the TFLite payload versus PTE payload size
 * build-time and runtime dependencies
 
 Do not interpret total frame period as NPU latency: capture, resizing, display
-updates, and logging occur outside the measured ``Invoke()`` interval.
+updates, and logging occur outside the measured ``Invoke()`` interval. The
+``U55`` and ``U85`` values measure wall time around ``Invoke()`` and include
+TFLite Micro delegate/runtime overhead. The ``NPU-active`` values come from
+the Ethos-U PMU counter in the same core-driver inference hooks used by the
+ExecuTorch build, so they isolate accelerator-active work from host backend
+overhead.

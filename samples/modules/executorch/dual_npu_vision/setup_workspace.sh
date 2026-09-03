@@ -5,7 +5,9 @@ sample_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 workspace=$(CDPATH= cd -- "$sample_dir/../../../../.." && pwd)
 executorch="$workspace/modules/lib/executorch"
 core_driver="$workspace/modules/ethos-u-core-driver-src"
-patch="$sample_dir/patches/executorch-dual-npu.patch"
+zephyr="$workspace/zephyr"
+executorch_patch="$sample_dir/patches/executorch-dual-npu.patch"
+zephyr_patch="$sample_dir/patches/zephyr-sram1-placement.patch"
 required_core_driver=b7cd193afde80afe8bbae9a26d2ca6586554f054
 
 # west currently supplies Zephyr's older hal_ethos_u snapshot. This separate
@@ -18,13 +20,29 @@ if [ ! -d "$executorch/.git" ]; then
   exit 1
 fi
 
-if git -C "$executorch" apply --reverse --check "$patch" 2>/dev/null; then
+if git -C "$executorch" apply --reverse --check "$executorch_patch" 2>/dev/null; then
   echo "ExecuTorch dual-NPU patch is already applied."
-elif git -C "$executorch" apply --check "$patch"; then
-  git -C "$executorch" apply "$patch"
+elif git -C "$executorch" apply --check "$executorch_patch"; then
+  git -C "$executorch" apply "$executorch_patch"
   echo "Applied ExecuTorch dual-NPU patch."
 else
   echo "ExecuTorch patch does not apply cleanly; inspect module changes." >&2
+  exit 1
+fi
+
+if [ ! -d "$zephyr/.git" ]; then
+  echo "Zephyr checkout not found at $zephyr" >&2
+  echo "Run 'west update' before setting up the sample." >&2
+  exit 1
+fi
+
+if git -C "$zephyr" apply --unidiff-zero --reverse --check "$zephyr_patch" 2>/dev/null; then
+  echo "Zephyr SRAM1 placement patch is already applied."
+elif git -C "$zephyr" apply --unidiff-zero --check "$zephyr_patch"; then
+  git -C "$zephyr" apply --unidiff-zero "$zephyr_patch"
+  echo "Applied Zephyr SRAM1 placement patch."
+else
+  echo "Zephyr SRAM1 placement patch does not apply cleanly; inspect module changes." >&2
   exit 1
 fi
 

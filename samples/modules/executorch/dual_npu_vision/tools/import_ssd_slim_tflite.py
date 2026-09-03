@@ -29,9 +29,25 @@ def dequantize_tensor(interpreter: tf.lite.Interpreter, index: int) -> np.ndarra
     if not len(scales):
         return value
     axis = int(params["quantized_dimension"])
-    shape = [1] * value.ndim
-    shape[axis] = len(scales)
-    return (value - zero_points.reshape(shape)) * scales.reshape(shape)
+    scale_count = len(scales)
+    scale_shape = [1] * value.ndim
+    scale_shape[axis] = scale_count
+    scales = scales.reshape(scale_shape)
+
+    # TensorFlow 2.20 can expose a scalar zero point for a tensor with
+    # per-channel scales. A scalar broadcasts across every channel; only a
+    # per-channel zero-point vector should be reshaped along the quantized
+    # dimension.
+    if len(zero_points) == 1:
+        zero_points = zero_points[0]
+    elif len(zero_points) == scale_shape[axis]:
+        zero_points = zero_points.reshape(scale_shape)
+    else:
+        raise ValueError(
+            f"tensor {index} has {scale_count} scales but "
+            f"{len(zero_points)} zero points"
+        )
+    return (value - zero_points) * scales
 
 
 def pytorch_weight(value: np.ndarray, depthwise: bool) -> torch.Tensor:

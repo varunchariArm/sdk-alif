@@ -4,6 +4,7 @@
 #include <cmsis_core.h>
 #include <ethosu_device.h>
 #include <ethosu_driver.h>
+#include <pmu_ethosu.h>
 #include <soc_memory_map.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/cache.h>
@@ -17,6 +18,8 @@ static struct ethosu_driver u55_driver;
 static struct ethosu_driver u85_driver;
 static volatile unsigned u55_irqs;
 static volatile unsigned u85_irqs;
+static volatile uint64_t u55_pmu_cycles;
+static volatile uint64_t u85_pmu_cycles;
 
 void *ethosu_mutex_create(void)
 {
@@ -124,6 +127,29 @@ static void u85_isr(const void *unused)
 	ethosu_irq_handler(&u85_driver);
 }
 
+void ethosu_inference_begin(struct ethosu_driver *drv, void *user_arg)
+{
+	ARG_UNUSED(user_arg);
+	ETHOSU_PMU_Enable(drv);
+	ETHOSU_PMU_PMCCNTR_CFG_Set_Start_Event(drv, ETHOSU_PMU_NPU_ACTIVE);
+	ETHOSU_PMU_PMCCNTR_CFG_Set_Stop_Event(drv, ETHOSU_PMU_NPU_IDLE);
+	ETHOSU_PMU_CNTR_Enable(drv, ETHOSU_PMU_CCNT_Msk);
+	ETHOSU_PMU_CYCCNT_Reset(drv);
+}
+
+void ethosu_inference_end(struct ethosu_driver *drv, void *user_arg)
+{
+	ARG_UNUSED(user_arg);
+	uint64_t cycles = ETHOSU_PMU_Get_CCNTR(drv);
+	ETHOSU_PMU_CNTR_Disable(drv, ETHOSU_PMU_CCNT_Msk);
+	ETHOSU_PMU_Disable(drv);
+	if (drv == &u55_driver) {
+		u55_pmu_cycles = cycles;
+	} else if (drv == &u85_driver) {
+		u85_pmu_cycles = cycles;
+	}
+}
+
 int dual_ethosu_init(void)
 {
 	int ret;
@@ -151,3 +177,5 @@ int dual_ethosu_init(void)
 
 unsigned dual_ethosu_u55_irqs(void) { return u55_irqs; }
 unsigned dual_ethosu_u85_irqs(void) { return u85_irqs; }
+uint64_t dual_ethosu_u55_pmu_cycles(void) { return u55_pmu_cycles; }
+uint64_t dual_ethosu_u85_pmu_cycles(void) { return u85_pmu_cycles; }

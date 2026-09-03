@@ -152,6 +152,9 @@ The validated workspace uses:
 
 * ExecuTorch at the revision selected by ``west.yml`` plus
   ``patches/executorch-dual-npu.patch``.
+* Zephyr at the revision selected by ``west.yml`` plus
+  ``patches/zephyr-sram1-placement.patch``. This patch adds the Kconfig and
+  linker support that places the CDC200 framebuffer and video pool in SRAM1.
 * Ethos-U core driver ``main`` at ``modules/ethos-u-core-driver-src``. The
   checkout must contain commit
   ``b7cd193afde80afe8bbae9a26d2ca6586554f054``, which renamed and merged the
@@ -159,10 +162,14 @@ The validated workspace uses:
 * CMSIS-NN at ``modules/cmsis-nn-src``.
 
 Re-run ``setup_workspace.sh`` after ``west update`` because west may restore
-the ExecuTorch module checkout.
+the ExecuTorch or Zephyr module checkout.
 
 Generating the PTE models
 *************************
+
+This step is optional. The checked-in PTE files are packaged into
+``model_assets.bin`` by the firmware build, so building and flashing the
+sample does not need TensorFlow, TOSA Tools, or Vela.
 
 The checked-in PTE files are generated directly from trained torchvision
 checkpoints. ``export_torchvision_models.py`` performs PT2E quantization,
@@ -186,6 +193,14 @@ The ``env -u DEBUG`` prefix avoids treating an unrelated host ``DEBUG`` shell
 variable as ExecuTorch's numeric build option. The firmware build does not
 need the optional ``ethos_u`` Python dependency group; Vela is invoked
 separately when regenerating the models.
+
+Install the validated model-export dependencies. The helper preserves Vela
+5.0.0's FlatBuffers 24.3.25 dependency and installs TOSA Tools without asking
+pip to resolve its conflicting FlatBuffers 25.2.10 declaration:
+
+.. code-block:: console
+
+   ./sdk-alif/samples/modules/executorch/dual_npu_vision/tools/install_model_export_deps.sh
 
 Download the trained public SSD-Slim artifact and the official torchvision
 MobileNetV2 checkpoint. Importing the SSD constants produces the common
@@ -223,8 +238,28 @@ Expected outputs are:
 * ``models/labels_imagenet_1000.txt``: torchvision's matching ImageNet labels.
 
 Both PTEs expose int8 inputs and outputs and contain one Ethos-U delegate with
-no CPU fallback. Rebuild after replacing either PTE; CMake watches the model
-files and regenerates the compiled MRAM offsets automatically.
+no CPU fallback. The exporter applies ExecuTorch's ``QuantizeInputs`` and
+``QuantizeOutputs`` passes after Ethos-U lowering. The generated ``forward``
+method therefore consumes and returns int8 tensors directly; it does not add
+an FP32-to-int8 conversion of the camera image or an int8-to-FP32 conversion
+of the model outputs to the measured ``method->execute()`` interval. The PTEs
+also contain the quantization scale, zero point, range, and dtype configuration
+methods emitted by those passes. Rebuild after replacing either PTE; CMake
+watches the model files and regenerates the compiled MRAM offsets
+automatically.
+
+Runtime timing reports two complementary metrics:
+
+* ``U55`` and ``U85`` are wall-clock durations around each
+  ``method->execute()`` call. They include ExecuTorch dispatch and delegate
+  overhead in addition to accelerator execution.
+* ``NPU-active U55/U85`` is the Ethos-U PMU cycle counter configured to count
+  from ``NPU_ACTIVE`` to ``NPU_IDLE`` in the core-driver inference hooks. It
+  excludes camera preprocessing, tensor copies, display work, and host runtime
+  dispatch.
+
+Use the PMU cycles to compare what Vela scheduled on each NPU, and the
+wall-clock values to compare complete backend invocation cost.
 
 Runtime and artifact size
 *************************
@@ -242,13 +277,13 @@ For the validated comparable models, the current pristine build measures:
    * - Artifact
      - Size
    * - Zephyr firmware ``zephyr.bin``
-     - 203,084 bytes
+     - 203,352 bytes
    * - Combined model/test payload
-     - 3,888,654 bytes
+     - 3,896,318 bytes
    * - U55 SSD-Slim PTE
-     - 296,896 bytes
+     - 301,408 bytes
    * - U85 MobileNetV2 PTE
-     - 3,470,624 bytes
+     - 3,473,776 bytes
 
 An ``nm`` check of the resulting ELF reports no ``cortex_m::native``
 fallback-op symbols.
