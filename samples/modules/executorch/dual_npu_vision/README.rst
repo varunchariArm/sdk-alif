@@ -9,6 +9,10 @@ uses the native Zephyr MT9M114, ISP and MW405
 drivers on the Alif SDK ``main`` branch. The MT9M114 and MW405 support landed
 through Alif PR #879; no MLEK camera or display bridge is linked.
 
+For a greenfield, side-by-side ExecuTorch and TFLite Micro build, model
+generation, deployment, and measurement procedure, see
+``samples/modules/dual_npu_vision_backend_comparison.rst``.
+
 Hardware
 ********
 
@@ -32,8 +36,10 @@ caches from an older SDK or core-driver branch cannot affect the build:
    python -m pip install --upgrade pip
    python -m pip install west pyelftools fdt ninja
 
-   west init -m https://github.com/varunchariArm/sdk-alif.git --mr main
-   west config manifest.project-filter +executorch
+   git clone --branch dual-npu-main-integration --single-branch \
+     https://github.com/varunchariArm/sdk-alif.git sdk-alif
+   west init -l sdk-alif
+   west config manifest.project-filter +executorch,+alif-mlek
    west update
    python -m pip install -r zephyr/scripts/requirements.txt
    git -C modules/lib/executorch submodule update --init --recursive

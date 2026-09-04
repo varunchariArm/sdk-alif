@@ -14,6 +14,10 @@ The U55 receives the smaller detector, while the higher-throughput U85 runs
 the substantially larger classifier. This pairing demonstrates heterogeneous
 workload placement rather than assigning both NPUs copies of one task.
 
+For a greenfield, side-by-side TFLite Micro and ExecuTorch build, model
+generation, deployment, and measurement procedure, see
+``samples/modules/dual_npu_vision_backend_comparison.rst``.
+
 Model provenance
 ****************
 
